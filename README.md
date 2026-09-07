@@ -1,136 +1,115 @@
 # Thai Pesticide Guidance RAG
 
-A Retrival-Augmented Generation system answering over The Thai Department of Agriculture's pesticide recommendation handbooks (คำแนะนำการใช้สารป้องกันกำจัดศัตรูพืช)
+ระบบถาม-ตอบภาษาไทยบนคู่มือคำแนะนำการใช้สารป้องกันกำจัดศัตรูพืช ของกรมวิชาการเกษตร
 
-## Personal Information
+A Thai-language question answering system over the Thai Department of Agriculture's
+pesticide recommendation handbooks (คำแนะนำการใช้สารป้องกันกำจัดศัตรูพืช).
 
-> From my experience, I am familiar with RAG concepts and have built local RAG applications for personal use. However, I realized I did not fully know how to deploy RAG in a real production environment. Therefore, this project is a learning opportunity for me to build production-ready RAG systems and deepen my understanding of core concepts, including data ingestion, retrieval, and evaluation.
+---
+
+## What it does
+
+Ask a question in Thai. Get an answer drawn only from the current edition of the handbook,
+with a citation you can go and check.
+
+> **Q:** ข้าวโพดเป็นโรคใบไหม้แผลใหญ่ ใช้สารอะไรได้บ้าง
+>
+> **A:** …
+> *ที่มา: คำแนะนำการใช้สารป้องกันกำจัดศัตรูพืช ฉบับปี 2568, หน้า 142*
+
+<!-- TODO: replace with a real question and answer from the system, plus a screenshot or GIF -->
+
+If the handbook doesn't cover the question, the system says so instead of guessing. For
+regulatory guidance, "I don't know" is a better answer than a confident wrong one.
+
+## Why I built this
+
+> I'm familiar with RAG concepts and have built local RAG applications for personal use.
+> What I hadn't done was deploy one in a real production environment. This project is my
+> way of learning that end to end — ingestion, retrieval, evaluation, and the operational
+> parts that tutorials skip.
+
+I picked this corpus on purpose. Pesticide guidance is revised every year or two, and the
+recommendations genuinely change: a chemical recommended in one edition may be withdrawn in
+the next. That makes it a corpus where retrieving the *wrong edition* isn't a slightly worse
+answer — it's a wrong answer with real consequences for whoever acts on it.
 
 ## The corpus
 
 Three editions from the Thai Department of Agriculture, in Buddhist Era years:
- 
-| Edition | Scope | Notes |
+
+| Edition | Coverage | Notes |
 |---|---|---|
 | 2565 | fungicide, insecticide, herbicide | Full compendium |
-| 2566 | insecticide | Separate insecticide-only series |
+| 2566 | insecticide | Insecticide-only, separate series |
 | 2568 | fungicide, insecticide, herbicide | Full compendium, current |
 
-I couldn't find the 2567 edition. So there is no 2567 edition. The gap is real, not a missing file.
+I could not locate a 2567 edition. The system doesn't assume editions arrive on a fixed
+schedule, so a gap in the sequence is handled as normal rather than treated as a missing
+file.
 
-## The real problem in this project:
+## Why this is harder than it looks
 
-### 1. The PDF metadata trap
+Two things in this corpus break the obvious approach. Both were found by actually opening
+the files, not by assuming.
 
-The obvious way to order editions is by document date. That is wrong for this corpus.
-The 2565 PDF was re-exported through iLovePDF in 2024, so its file metadata makes it look
-*newer* than the 2566 edition. Any pipeline that sorts by `CreationDate` or `ModDate` will confidently serve three-year-old guidance as current.
+### The newest file is not the newest edition
 
-### 2. Supersession is about scope, not title
+The natural way to decide which edition is current is to look at the document date. That
+fails here: the 2565 PDF was re-exported through iLovePDF in 2024, so its file metadata
+makes it look *newer* than the 2566 edition. A pipeline that trusts file dates will serve
+three-year-old guidance as if it were current, and will look perfectly correct while doing
+it.
 
-The 2566 volume is an insecticide-only book from a different publication series than the 2565/2568 compendia. Title similarity, filename patterns, and "document family" all fail here: 2566 does not look like the other two, so a title-driven rule would never retire it, even though the 2568 compendium fully covers its subject matter.
+The system reads the edition year printed inside the document instead, and never uses file
+metadata to decide what's current.
 
----
+### A new edition can retire a book that looks nothing like it
 
-## Architecture
+The 2566 volume covers insecticides only and belongs to a different publication series than
+the 2565 and 2568 compendia — different title, different format. But the 2568 compendium
+covers insecticides too, so 2566 is fully superseded by it.
 
-![alt text](docs/system_design.png)
+Any rule based on title similarity or "document family" would keep 2566 alive forever. The
+system compares *what subject areas each edition covers* rather than what it's called, which
+retires 2566 correctly even across series boundaries.
 
----
-- **File hash check** — `file_hash` on `document` rejects re-uploads of identical bytes.
-- **Parsing** — PyMuPDF, with layout and table extraction and an OCR fallback.
-- **Parsing QA gate** — a document is not allowed into the index until it passes: page
-  count matches, tables and layout extracted, OCR confidence above threshold, Thai
-  combining marks intact. The result is stored in `document.qa` so a failure is
-  inspectable rather than silent.
-- **Chunking** — size and overlap tuned for Thai prose and for tabular recommendation
-  entries, which behave very differently.
-- **Indexing** — dense and sparse representations, with the embedding model version pinned
-  per document so a model upgrade never silently mixes vector spaces.
-- **Promotion** — `promote_current_edition()` runs the scope-superset comparison, flips
-  the superseded document to `archived`, and nulls its embeddings in one transaction.
+## How it works
 
----
+![System architecture](docs/system_design.png)
 
-Answers cite source document, edition year and page number, so a user can open the original
-PDF and check. Refusing is a first-class outcome: below-threshold retrieval and failed
-grounding checks both return "I don't have this in the current guidance" rather than a
-plausible fabrication.
+Uploading a PDF triggers an automated pipeline: extract the text, run a quality check, split
+it into passages, and add them to a searchable index. Once a new edition is indexed, any
+edition it fully supersedes is archived — removed from search, but kept on record so the
+history stays auditable.
 
-## Data Model
+On the query side, a question is screened, matched against the index, and the strongest
+passages are passed to a language model that must answer from them and cite where each claim
+came from. A second check verifies the answer is actually supported by those passages before
+it reaches the user.
 
-**`document`** — one row per source PDF.
- 
-| Column | Purpose |
-|---|---|
-| `document_id` | PK |
-| `source` | Original filename |
-| `title_th` | Display title shown in citations |
-| `edition_year_be` | Buddhist Era year **read from inside the document** |
-| `scopes` | `text[]` — subset of `{fungicide, insecticide, herbicide}`; drives supersession |
-| `status` | `pending` / `active` / `archived` |
-| `file_hash` | Duplicate upload detection |
-| `page_count` | QA cross-check |
-| `parser` | Which extractor produced the text |
-| `qa` | Parsing QA gate results |
-| `ingested_at` | Ingestion timestamp |
- 
-**`chunk`** — one row per retrievable unit.
- 
-| Column | Purpose |
-|---|---|
-| `chunk_id` | PK |
-| `document_id` | FK → `document` |
-| `content` | Raw extracted text, un-normalized |
-| `content_sha256` | Hash of the *normalized* text; cross-edition dedup |
-| `page_number` | So citations point at a real page |
-| `section` | Heading the chunk sits under |
-| `metadata` | Domain fields lifted out of tables (crop, pest, active ingredient, rate) |
-| `embedding` | Nullable; `NULL` ⇒ archived and out of the index |
-| `created_at` | |
+Full technical detail, schema, and design rationale: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
-## Repository Layout
+## How it's evaluated
 
-```
-db/
-  schema.sql              # 2 tables, views, promote_current_edition()
-  migrations/
-ingest/
-  extract.py              # PyMuPDF extraction
-  normalize.py            # Thai normalization pipeline
-  qa_gate.py              # parsing QA checks
-  chunk.py
-  embed.py
-  promote.py              # scope-superset supersession
-query/
-  guards.py               # input/output guardrails
-  retrieve.py             # hybrid dense + sparse
-  rerank.py
-  prompt.py               # citation-carrying prompt assembly
-app/
-  main.py                 # Cloud Run service
-eval/
-  questions.yaml          # gold set
-  run_eval.py
-docs/
-```
-## Evaluation
- 
-The gold set is built around the failure modes this system is designed to prevent, not
-just general answer quality:
- 
-- **Edition correctness** — questions whose answer changed between 2565 and 2568. The
-  system must return the 2568 value.
-- **Supersession** — questions answerable only from 2566, which must now be served from
-  2568 and must never cite the archived volume.
-- **Abstention** — questions with no support in the current edition. Refusing is the
-  correct answer.
-- **Citation validity** — every cited page number must exist and must actually contain the
-  claim.
-- **Retrieval quality** — recall@k and MRR against labelled chunks.
+<!-- TODO: mark as "planned" until the gold set actually exists -->
+
+Evaluation targets the specific failure modes this system exists to prevent, not general
+answer quality:
+
+- **Edition correctness** — questions whose answer changed between editions must return the
+  current value.
+- **Supersession** — questions answerable from the archived 2566 volume must now be served
+  from 2568, and must never cite the archived one.
+- **Abstention** — for questions the handbook doesn't cover, refusing is the correct answer.
+- **Citation validity** — every cited page must exist and must actually contain the claim.
+- **Retrieval quality** — recall@k and MRR against labelled passages.
+
+## Status
+
 
 ## Disclaimer
- 
-This is a portfolio project. It is not an official Department of Agriculture service and
-its answers should not be relied on for real pesticide application decisions. Always
-consult the published handbook.
+
+This is a portfolio project. It is not an official Department of Agriculture service, and
+its answers should not be relied on for real pesticide application decisions. Always consult
+the published handbook.
