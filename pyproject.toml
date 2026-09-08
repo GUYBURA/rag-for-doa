@@ -1,7 +1,7 @@
 [project]
 name = "rag-production"
 version = "0.1.0"
-description = "Add your description here"
+description = "RAG over Thai DOA pesticide guidance handbooks"
 readme = "README.md"
 authors = [
     { name = "BBUNCH01", email = "buranon.b.d5-a@thaiairways.com" }
@@ -9,16 +9,19 @@ authors = [
 requires-python = ">=3.13"
 
 dependencies = [
-  "langchain-core",
-  "langchain-postgres",
-  "langchain-text-splitters",
-  "langchain-community",
-  "langchain-google-vertexai",
-  "pymupdf",
-  "pythainlp",
-  "psycopg[binary,pool]",
-  "sqlalchemy",
-  "pgvector",
+  # langchain-* pinned exact: PGVector was deprecated for PGVectorStore once
+  # already, and a minor bump can move the retrieval surface underneath us.
+  "langchain-core==1.6.2",
+  "langchain-postgres==0.0.17",
+  "langchain-text-splitters==1.1.2",
+  "langchain-ollama==1.1.0",
+  "langchain-community==0.4.2",
+  "langchain-google-vertexai==3.2.4",
+  "pymupdf>=1.28.2",
+  "pythainlp>=5.3.7",
+  "psycopg[binary,pool]>=3.3.5",
+  "sqlalchemy>=2.0.52",
+  "pgvector>=0.3.6",
   "fastapi",
   "uvicorn[standard]",
   "pydantic",
@@ -26,15 +29,16 @@ dependencies = [
   "structlog",
   "tenacity",
   "langsmith",
-  "psycopg2>=2.9.12",
 ]
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy", "testcontainers[postgres]"]
 
-[project.scripts]
-rag-production = "rag_production:main"
+# Flat layout (ingest/, query/, app/, eval/) run as `python -m ingest.run` from
+# the repo root, per CLAUDE.md. Nothing imports this project as a library, so
+# there is no build backend and no installable package.
+[tool.uv]
+package = false
 
-[build-system]
-requires = ["uv_build>=0.11.25,<0.12.0"]
-build-backend = "uv_build"
+[tool.pytest.ini_options]
+pythonpath = ["."]
