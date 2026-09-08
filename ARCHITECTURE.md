@@ -9,8 +9,8 @@ plain-language overview, see [README.md](README.md).
 
 The corpus is a multi-edition regulatory document set. Retrieving the wrong edition is not a
 worse answer, it is a wrong answer — a withdrawn chemical presented as current guidance.
-Most of the engineering here is about making superseded content structurally unreachable
-rather than merely deprioritised.
+Most of the engineering here is about making superseded content unreachable by construction
+rather than by a filter someone has to remember to apply.
 
 Three findings from inspecting the source files drove the design.
 
@@ -31,39 +31,48 @@ similarity, filename patterns and "document family" heuristics all fail: 2566 re
 neither compendium, so a title-driven rule would never retire it, despite 2568 fully
 covering its subject matter.
 
-Supersession compares a `scopes text[]` array instead:
+Supersession is decided on coverage. A document is archived once every scope it covers is
+covered by at least one newer document:
 
 ```sql
--- A supersedes B
-A.edition_year_be > B.edition_year_be
-AND A.scopes @> B.scopes
+NOT EXISTS (
+  SELECT 1 FROM unnest(d.scopes) AS u(scope)
+  WHERE NOT EXISTS (
+    SELECT 1 FROM document n
+    WHERE n.edition_year_be > d.edition_year_be AND u.scope = ANY (n.scopes)
+  )
+)
 ```
 
-`{fungicide, insecticide, herbicide} @> {insecticide}` is true, so 2568 retires 2566 across
-the series boundary. The rule is about coverage, which is what supersession actually means,
-rather than about naming, which is a proxy that happens to fail on this corpus.
+This is union coverage across newer editions, not single-document superset: three newer
+single-scope volumes together retire one older compendium, which is what supersession
+actually means. It also crosses the series boundary correctly — 2568 retires 2566 despite
+looking nothing like it.
 
 ### 3. Query-time filtering is the wrong layer for archival
 
-A `WHERE is_archived = false` predicate still leaves stale vectors inside the HNSW index.
+A `WHERE status = 'active'` predicate still leaves superseded vectors inside the HNSW index.
 Approximate search visits them, the filter discards them afterwards, and recall for the
 current edition degrades — the standard post-filtering problem in ANN search. With ~48% of
-2568's prose duplicated from 2565, a large fraction of the index would be archived
-near-duplicates competing for the same candidate slots.
+2568's prose duplicated from 2565, a large share of candidate slots would go to archived
+near-duplicates before filtering ever ran.
 
-Instead, `chunk.embedding` is nullable and the HNSW index is partial:
+So archived editions have no chunks at all. `promote_current_edition()` flips the document's
+status and deletes its rows from `chunk` in one transaction. There is no
+filtered-but-present state, which means nothing to get wrong at query time and no predicate
+any retrieval path can forget.
 
-```sql
-CREATE INDEX chunk_embedding_hnsw
-  ON chunk USING hnsw (embedding vector_cosine_ops)
-  WHERE embedding IS NOT NULL;
-```
+**Why deleting is safe here.** The audit trail lives on `document`, which is never deleted:
+`title_th`, `edition_year_be`, `scopes`, `page_count`, `chunk_count`, `qa`, `ingested_at`,
+`archived_at` and `file_hash` all survive archival. The source PDF stays in Cloud Storage.
+Together these make re-ingestion deterministic — `file_hash` proves the same bytes,
+`chunk_count` proves the same result — so recovering an archived edition costs a re-parse
+and re-embed, not information. Keeping archived chunks in the same table the system searches
+would trade that modest cost for a permanent correctness risk.
 
-Archiving a document nulls its embeddings, so those chunks become **physically absent from
-the vector index** rather than filtered out of its results. The rows, their text, page
-numbers and provenance survive, keeping the archive auditable and allowing an edition to be
-re-embedded if it ever needs to return. Correctness is enforced by the schema rather than by
-remembering a predicate in every query.
+An earlier design kept archived chunks with `embedding = NULL` behind a partial HNSW index.
+It worked, but it made `chunk` a table with business rules embedded in its constraints,
+which fought the vector-store library that reads it. Deleting is simpler and fails louder.
 
 ---
 
@@ -72,47 +81,67 @@ remembering a predicate in every query.
 Two tables. Earlier drafts had sixteen, then six; the reductions removed speculative
 normalization for queries the system never runs.
 
-### `document` — one row per source PDF
+### `document` — one row per volume, never deleted
 
 | Column | Type | Purpose |
 |---|---|---|
-| `document_id` | PK | |
+| `document_id` | uuid PK | |
 | `source` | text | Original filename |
 | `title_th` | text | Display title shown in citations |
-| `edition_year_be` | int | Buddhist Era year **read from inside the document** |
-| `scopes` | `text[]` | Subset of `{fungicide, insecticide, herbicide}`; drives supersession |
+| `edition_year_be` | smallint | Buddhist Era year **read from inside the document** |
+| `scopes` | `text[]` | Non-empty subset of `{fungicide, insecticide, herbicide}`; drives supersession |
 | `status` | text | `pending` / `active` / `archived` |
-| `file_hash` | text | Duplicate upload detection |
+| `file_hash` | char(64) | Duplicate upload detection; proves re-ingest identity |
 | `page_count` | int | QA cross-check against extraction |
+| `chunk_count` | int | As of last ingest; survives archival, verifies re-ingest |
 | `parser` | text | Which extractor produced the text |
+| `embedding_model` | text | Pinned per document |
 | `qa` | jsonb | Parsing QA gate results |
 | `ingested_at` | timestamptz | |
+| `archived_at` | timestamptz | Set by `promote_current_edition()` |
 
-### `chunk` — one row per retrievable unit
+Uniqueness is `(edition_year_be, source)`, not the year alone: the corpus has two
+publication series, so one year can carry more than one volume.
+
+### `chunk` — retrievable passages of active editions only
+
+Column names match what LangChain's `PGVectorStore` expects, so it attaches to this table
+directly with no subclass. The DDL is ours.
 
 | Column | Type | Purpose |
 |---|---|---|
-| `chunk_id` | PK | |
-| `document_id` | FK → `document` | |
+| `langchain_id` | uuid PK | |
 | `content` | text | Raw extracted text, un-normalized |
-| `content_sha256` | text | Hash of the **normalized** text; cross-edition dedup |
+| `embedding` | vector(768) NOT NULL | |
+| `document_id` | uuid FK → `document` | |
 | `page_number` | int | So citations point at a real page |
 | `section` | text | Heading the chunk sits under |
-| `metadata` | jsonb | Domain fields lifted from tables (crop, pest, active ingredient, rate) |
-| `embedding` | vector, **nullable** | `NULL` ⇒ archived and out of the index |
+| `content_sha256` | char(64) | Hash of the **normalized** text; unique per document |
+| `langchain_metadata` | jsonb | Domain fields lifted from tables (crop, pest, active ingredient, rate) |
+| `content_tsv` | tsvector | Sparse half of hybrid retrieval |
 | `created_at` | timestamptz | |
 
 Storing raw `content` while hashing normalized text is deliberate. Roughly **48% of 2568's
-prose lines are byte-identical to 2565's** after normalization; without a normalized hash the
-index fills with near-duplicates differing only in invisible whitespace and combining-mark
-ordering. Keeping `content` raw preserves what the PDF actually said, which matters when a
-citation is disputed.
+prose lines are byte-identical to 2565's** after normalization, so an un-normalized hash
+would miss real duplicates entirely. Keeping `content` raw preserves what the PDF actually
+said, which matters when a citation is disputed.
+
+`content_tsv` is populated by the ingest pipeline from PyThaiNLP `newmm` output rather than
+by a generated column: Postgres has no Thai word-boundary parser, so tokenization happens in
+Python and lands here pre-segmented.
 
 ### `promote_current_edition()`
 
-Runs the scope-superset comparison, flips superseded documents to `archived`, and nulls
-their embeddings. Must remain transactional — a half-promoted state where two editions are
-simultaneously queryable is the worst possible outcome for this system.
+Runs the coverage comparison, flips superseded documents to `archived`, and deletes their
+chunks. Must remain transactional — a half-promoted state where an edition is marked
+archived but still has live chunks is exactly the failure this system exists to prevent.
+
+### `assert_no_stale_chunks`
+
+Must always return zero rows. LangChain owns retrieval and cannot see `document.status`, so
+the entire guarantee is that non-active editions have no chunks. This view is the
+enforcement mechanism, not a diagnostic — it belongs in the test suite, asserted after every
+promote.
 
 ---
 
@@ -145,18 +174,19 @@ pages. pdfplumber was evaluated and rejected — see [Thai text handling](#thai-
 | Thai combining marks intact | Silent text corruption |
 
 Results are written to `document.qa`, so a failure is inspectable rather than silent. There
-is no bypass flag: a document that fails is `pending` with a recorded reason, not `active`
-with a warning.
+is no bypass flag: a document that fails stays `pending` with a recorded reason, rather than
+going `active` with a warning.
 
 **Chunking.** Size and overlap are tuned separately for Thai prose and for tabular
 recommendation entries, which behave very differently — prose rewards overlap, table rows
 are self-contained and are fragmented by it.
 
-**Indexing.** Dense and sparse representations. The embedding model version is pinned per
-document so a model upgrade cannot silently mix vector spaces; changing models means
-re-embedding the whole active set.
+**Indexing.** Dense and sparse representations. `document.embedding_model` pins the model
+version so an upgrade cannot silently mix vector spaces; changing models means re-embedding
+the whole active set.
 
-**Promotion.** `promote_current_edition()` archives superseded editions in one transaction.
+**Promotion.** `promote_current_edition()` archives superseded editions and removes their
+chunks in one transaction.
 
 ---
 
@@ -179,6 +209,9 @@ User → Input Guard → Embed → Hybrid Retrieval → Re-rank → Prompt Build
 **Hybrid retrieval** combines dense vectors with sparse lexical matching. Thai pesticide
 names and active ingredients are largely transliterated or Latin-script chemical names, which
 dense embeddings handle poorly and lexical matching handles well.
+
+No edition filter appears anywhere in this path. Everything in `chunk` belongs to an active
+edition by construction — that is the point of the archival design.
 
 **Re-ranking** keeps the top 5 above a score threshold. If nothing clears it, the pipeline
 returns "no relevant document" rather than passing weak context to the model.
@@ -223,6 +256,24 @@ Steps 1 and 2 must precede any hashing or comparison; steps 3–5 must precede c
 
 ---
 
+## Implementation notes
+
+LangChain owns the retrieval layer only. `PGVectorStore` attaches to the `chunk` table by
+column name; prompt assembly, chaining and tracing run through LangChain as well. Everything
+else — migrations, ingestion writes, `promote_current_edition()`, and the
+`assert_no_stale_chunks` assertion — goes through `psycopg` directly.
+
+The boundary is deliberate. A vector-store abstraction models one table of embeddings; it
+has no concept of editions, supersession, or a document-level audit trail, so those stay in
+SQL where they can be enforced rather than remembered.
+
+An earlier iteration let LangChain create the table via `init_vectorstore_table()`. That
+added a Python step in the middle of every migration and let a library upgrade change the
+schema with no diff to review. The DDL is now hand-maintained, with column names kept
+LangChain-compatible.
+
+---
+
 ## Deployment
 
 | Concern | Service |
@@ -248,7 +299,7 @@ The gold set targets the failure modes this design exists to prevent:
 | Dimension | What it tests |
 |---|---|
 | Edition correctness | Questions whose answer changed between 2565 and 2568 must return the 2568 value |
-| Supersession | Questions answerable from 2566 must be served from 2568 and must never cite the archived volume |
+| Supersession | Questions answerable from 2566 must be served from 2568, and no citation may reference an archived volume |
 | Abstention | Questions with no support in the current edition — refusing is correct |
 | Citation validity | Every cited page exists and contains the claim |
 | Retrieval quality | recall@k and MRR against labelled chunks |
@@ -261,6 +312,9 @@ guidance.
 
 ## Known limitations
 
+- **Recovering an archived edition requires re-ingestion.** Chunks are deleted, so restoring
+  2566 means re-parsing and re-embedding it. Deterministic, but not free — accepted in
+  exchange for a retrieval path with no edition filter in it.
 - **Table extraction quality varies by edition.** Some recommendation tables still need
   manual verification after the QA gate passes.
 - **Uniform chunking.** Recommendation tables would likely benefit from a row-per-chunk
