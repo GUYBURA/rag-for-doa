@@ -124,7 +124,10 @@ vowels and tone marks. PyMuPDF extracts the same file with zero errors. This was
 not assumed. If PyMuPDF lacks something you need, raise it rather than swapping parsers.
 
 **8. Never index text that hasn't been through `normalize.py`.** Order matters:
-1. PUA tone marks `U+F700`–`U+F71A` → real Thai codepoints (the 2565 cover page has 225)
+1. PUA tone marks `U+F700`–`U+F71A` → real Thai codepoints (225 in 2565, spread over pages
+   1, 2 and 220 — not only the cover). This range is the *Thai* slice of the private use
+   area. 2568 carries 593 private-use characters from SymbolMT and Wingdings at `U+F0xx`
+   that nothing here repairs, three of them real content (α, Δ, →). See LOG.md.
 2. Unicode NFC
 3. Strip headers/footers (they contain the edition year and leak into chunk text)
 4. Strip page numbers and dot leaders
