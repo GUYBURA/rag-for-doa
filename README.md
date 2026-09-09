@@ -107,6 +107,47 @@ answer quality:
 
 ## Status
 
+In progress. Ingestion is being built stage by stage, and each stage lands with the tests
+that prove it before the next one starts.
+
+**Working**
+
+- **Text extraction** — PyMuPDF, raw text out with 1-based page numbers preserved for
+  citation. pdfplumber was measured against it and rejected: it silently reorders and drops
+  Thai vowels and tone marks on the 2568 file.
+- **Thai normalization** — the full five-step pipeline, 34 tests. Private Use Area tone
+  marks restored to real Thai codepoints, Unicode NFC, running headers and footers removed,
+  page numbers and dot leaders stripped, whitespace collapsed.
+
+  Two findings from this stage are written up in [KNOWLEDGE.md](KNOWLEDGE.md). The step
+  order is not stylistic: PUA codepoints carry combining class 0, so NFC has nothing to
+  reorder until they are repaired, and running the two steps the other way round changes the
+  result on 6.6% of mixed-script inputs. Each of those is a pair of lines that look
+  identical but hash differently, which quietly breaks deduplication. There is a test that
+  fails if anyone reorders the steps.
+
+**Next**
+
+- **Parsing QA gate** — page-count cross-check, blank-page ratio, image-without-text
+  detection, unmapped PUA, and validation that the hand-entered subject scopes are present.
+  A document that fails is recorded and left unprocessed; there is no bypass.
+- **Chunking** — prose and dosage tables need different strategies. Splitting a dosage table
+  mid-row produces a chunk that states the wrong application rate, which is the most
+  consequential failure this corpus allows.
+- **Storage, embedding, and supersession** — these need a real Postgres with pgvector under
+  test, since the guarantees that matter here are schema-level and cannot be mocked.
+
+**Known gaps**
+
+- Only the 2568 edition is in hand. Supersession cannot be tested end to end until 2565 and
+  2566 are available, since there is nothing yet to archive.
+- The PUA repair table is a hypothesis. The 2568 file contains no PUA characters at all — it
+  is the 2565 cover page that carries them — so the mapping is unverified against a real
+  document. The code raises on any unmapped PUA rather than dropping it silently, so the
+  first 2565 ingest will say so loudly rather than corrupting a chemical name.
+- Subject scopes are entered by hand, which makes supersession dependent on a human getting
+  them right. The QA gate checks they are present; it cannot check they are correct.
+- The retrieval side, evaluation set, and service have not been started.
 
 ## Disclaimer
 
