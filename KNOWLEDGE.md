@@ -135,3 +135,58 @@ honest about is its reach: it catches deletion, never reordering, and I broke th
 by class to show that even losing every upper vowel still clears the floor. Tightening the
 threshold does not fix that — the real answer is a per-class presence check, which I scoped
 as separate work rather than pretending one number covers it.
+
+### Concept: The PUA is not one range, and symbol fonts hide real characters in it
+
+**Definition:** Unicode's Private Use Area is U+E000–U+F8FF. `PUA_TO_THAI` and `PUA_RANGE`
+cover only U+F700–U+F71A, the sub-range Thai fonts use for pre-positioned tone marks.
+Legacy symbol fonts — SymbolMT, Wingdings — use U+F0xx instead, mapping their glyph at byte
+`0xNN` to `U+F0NN`. PyMuPDF reports what the PDF encodes, so those glyphs arrive as PUA
+codepoints too, and a scan limited to the Thai sub-range reports zero.
+
+Measured across all three editions:
+
+```
+2568  593 PUA total    0 in F700-F71A    F07E x586, F061 x3, F072 x3, F022 x1
+2565  233 PUA total  225 in F700-F71A    F061 x3, F072 x3, F022 x1, F097 x1
+2566    0 PUA
+```
+
+The project's working assumption was "2568 has no PUA". It has 593. The number came from
+`survey_pua()`, which is bounded by `PUA_RANGE`.
+
+Identified by rendering each glyph from the PDF at 8x rather than by reading a font table:
+
+```
+U+F061  SymbolMT     α   "กลุ่มเคมี α-Chloroacetamides"      -> part of a chemical group name
+U+F072  Wingdings3   △   used as Δ in "Δ14-reductase"        -> FRAC mode-of-action text
+U+F022  Wingdings3   →   "Δ8→Δ7-isomerase"                    -> same sentence
+U+F07E  SymbolMT     ∼   flanks headings, x586                -> decoration
+U+F097  Wingdings2   (renders blank), x1
+```
+
+**Why it matters here:** α, Δ and → are content. They sit inside chemical group names and
+FRAC mode-of-action descriptions — exactly the text a question about a pesticide's mode of
+action would have to retrieve. Today they reach `chunk.content` as U+F061 and friends, so
+they are unsearchable, they cannot render, and they change `content_sha256` for lines that
+are otherwise identical across editions.
+
+The QA gate does not catch this. `unmapped_pua_codepoints` scans `PUA_RANGE`, so a document
+with 593 unrepaired PUA characters passes cleanly. The check is narrower than its name
+suggests.
+
+**Not fixed yet.** Widening the range touches both `normalize.py` step 1 and the gate, which
+CLAUDE.md gates behind sign-off, and the mapping is not a single table: U+F061 means α only
+because the span's font is SymbolMT. The same codepoint under a different font is a
+different character, so a font-blind table would be wrong by construction. Any fix has to
+read the span font, which means `extract.py` would have to carry font information it does
+not carry today — a change to the Page contract, not a lookup table.
+
+**Interview answer:** I found 593 private-use codepoints in a document our tooling reported
+as having none, because the survey was scoped to the Thai tone-mark sub-range while the file
+also embeds SymbolMT and Wingdings. I identified them by rendering the glyphs out of the PDF
+rather than trusting a font chart, and three of them are semantic — alpha, delta and an
+arrow inside chemical group names and FRAC mode-of-action text. The fix is not a bigger
+lookup table: the same codepoint means different things under different fonts, so a correct
+repair needs font context from the extraction layer, which changes the Page contract. I
+recorded it and left the pipeline alone rather than guessing a mapping into chemical names.

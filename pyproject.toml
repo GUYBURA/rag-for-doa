@@ -34,11 +34,11 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy", "testcontainers[postgres]"]
 
-# Flat layout (ingest/, query/, app/, eval/) run as `python -m ingest.run` from
-# the repo root, per CLAUDE.md. Nothing imports this project as a library, so
-# there is no build backend and no installable package.
 [tool.uv]
 package = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+  "requires_source_pdfs: needs data/raw/*.pdf, which are gitignored and absent in CI",
+] 

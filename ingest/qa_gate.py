@@ -21,6 +21,12 @@ catches deletion only. Reordered marks (invariant 7's other failure mode) leave
 the count identical, and losing every upper vowel in the book still scores
 0.170. See KNOWLEDGE.md.
 
+unmapped_pua_codepoints scans PUA_RANGE, the Thai tone-mark sub-range, and so
+is blind to the U+F0xx private-use characters that SymbolMT and Wingdings
+produce - 593 of them in 2568, three of which are real content (alpha, delta,
+an arrow inside chemical group names). Repairing those needs the span font,
+which Page does not carry. See LOG.md.
+
 Text arrives raw, before normalize.py — the gate has to see the damage before
 anyone repairs it. A consequence is that mapped PUA tone marks are not counted
 as combining marks here, which biases combining_ratio slightly low on documents
