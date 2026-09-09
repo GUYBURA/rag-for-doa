@@ -76,3 +76,62 @@ produce the other, so the dedup hash splits identical content. I did not reach f
 it is far too aggressive for a document full of chemical names and percentages. The narrow
 fix belongs in the PUA mapping step, and I want occurrence counts from the real PDFs before
 committing to it.
+
+### Concept: A combining-mark ratio detects deletion, not reordering
+
+**Definition:** The QA gate's Thai health check is
+`count(combining marks) / count(Thai consonants)` over the whole document. Consonants are
+the denominator because they are what a broken parser leaves untouched: dropped vowels and
+tone marks shrink the numerator while the denominator stays fixed, so the signal is clean.
+Using *all* characters as the denominator would make the ratio track how much ASCII a page
+holds — chemical names, percentages, dosage tables — rather than how damaged the Thai is.
+
+Measured on `data/raw/2568.pdf` (raw text, pre-normalize):
+
+```
+marks 53,483 / consonants 161,382 = 0.3314      per-page median 0.3267
+lowest page p288 = 0.1863                        PUA marks 0
+pages with zero Thai consonants: 299, 300 (the two blank pages)
+```
+
+Floor set at **0.10** — a 3.3x margin at document level. The floor is deliberately a
+statement about the Thai language ("real Thai prose always carries marks"), not a fit to
+2568, so it survives 2565 and 2566 arriving with different densities.
+
+**Why it matters here:** the check is much weaker than it looks, and invariant 7 is the
+reason to be precise about it. pdfplumber both *reordered and dropped* marks on 2568. A
+ratio sees only the dropping half — reordering leaves the count identical, so a document
+whose marks are all in the wrong order passes at any threshold.
+
+Even for dropping, coverage is partial. Marks by class, and the ratio that survives if a
+parser loses a whole class:
+
+```
+upper vowels (ั ิ ี ึ ื ํ)  48.6%  ->  0.170   passes a 0.10 floor
+tone marks   (่ ้ ๊ ๋)      35.3%  ->  0.215   passes
+lower vowels (ุ ู ฺ)        10.2%  ->  0.298   passes
+```
+
+Losing every upper vowel in the book — about as bad as Thai damage gets — clears the gate
+comfortably. Only near-total loss (upper vowels *and* tone marks, 84% of all marks) drops to
+0.053 and fails.
+
+**Rejected: raising the floor to 0.20.** It would catch the upper-vowel case, but leaves
+only a 1.65x margin, still passes lower-vowel loss, and 2566 comes from a different
+publication series whose natural density is unmeasured. Buying one failure mode at the cost
+of false-failing a healthy edition is a bad trade, and a threshold that gets nudged whenever
+a document fails is not a gate.
+
+**The right fix, deferred:** assert each mark *class* is present at all. Every genuine Thai
+document contains upper vowels, lower vowels and tone marks; a class at zero is impossible
+in real text and needs no tuned number. That is a separate check, not a different threshold.
+Not added yet — 0.10 ships first, with the gap recorded here.
+
+**Interview answer:** The gate checks combining marks per Thai consonant, denominated on
+consonants because they are invariant under the failure being detected. I measured 0.33 on
+the live document and set the floor at 0.10, treating it as a fact about written Thai rather
+than a curve fit, so it generalizes to editions I have not ingested. What I want to be
+honest about is its reach: it catches deletion, never reordering, and I broke the marks down
+by class to show that even losing every upper vowel still clears the floor. Tightening the
+threshold does not fix that — the real answer is a per-class presence check, which I scoped
+as separate work rather than pretending one number covers it.

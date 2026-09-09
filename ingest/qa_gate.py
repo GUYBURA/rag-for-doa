@@ -1,0 +1,85 @@
+"""Blocking parse-quality gate. Invariant 9.
+
+A document that fails here is not chunked and not embedded; the result is
+written to document.qa and the row stays 'pending'. There is no bypass flag.
+
+The return value is a dict of check name -> {passed, measured, threshold}, not
+a boolean: invariant 9 requires the *reason* to reach document.qa, and a
+boolean cannot say which check fired or how far off it was. Every check runs on
+every call — none of them are expensive once the text is in memory, and
+short-circuiting would leave the qa record half empty.
+
+Thresholds are keyword arguments with defaults chosen as statements about Thai
+documents in general, not fits to any one edition, and the threshold actually
+used is recorded alongside each measurement so an old qa row stays readable
+after a default changes.
+
+combining_ratio_min = 0.10: marks per Thai consonant. Consonants are the
+denominator because a parser that drops vowels leaves them untouched. Measured
+on data/raw/2568.pdf: 53,483 / 161,382 = 0.3314, a 3.3x margin. Known gap: this
+catches deletion only. Reordered marks (invariant 7's other failure mode) leave
+the count identical, and losing every upper vowel in the book still scores
+0.170. See KNOWLEDGE.md.
+
+Text arrives raw, before normalize.py — the gate has to see the damage before
+anyone repairs it. A consequence is that mapped PUA tone marks are not counted
+as combining marks here, which biases combining_ratio slightly low on documents
+that use them (2568 has none; 2565 has 225).
+"""
+
+import re
+
+from ingest.extract import Page
+from ingest.normalize import PUA_RANGE, PUA_TO_THAI
+
+THAI_COMBINING = re.compile(r"[ัิ-ฺ็-๎]")
+THAI_CONSONANT = re.compile(r"[ก-ฮ]")
+
+
+def _check(passed: bool, measured, threshold=None) -> dict:
+    return {"passed": passed, "measured": measured, "threshold": threshold}
+
+
+def qa_gate(
+    pages: list[Page],
+    *,
+    pdf_page_count: int,
+    scopes: list[str],
+    empty_ratio_max: float = 0.5,
+    combining_ratio_min: float = 0.10,
+    thin_page_chars: int = 50,
+) -> dict[str, dict]:
+    """Run every parse-quality check. Returns the record for document.qa."""
+    numbers = [page.page_number for page in pages]
+    expected = list(range(1, len(pages) + 1))
+
+    text = "".join(page.raw_text for page in pages)
+    marks = len(THAI_COMBINING.findall(text))
+    consonants = len(THAI_CONSONANT.findall(text))
+
+    empty = [p.page_number for p in pages if not p.raw_text.strip()]
+    thin = [p.page_number for p in pages if len(p.raw_text.strip()) < thin_page_chars]
+    empty_ratio = len(empty) / len(pages) if pages else 1.0
+
+    unmapped = sorted(
+        {f"U+{ord(c):04X}" for c in PUA_RANGE.findall(text) if c not in PUA_TO_THAI}
+    )
+
+    return {
+        "page_numbers_not_sequential": _check(numbers == expected, numbers),
+        "page_count_mismatch": _check(
+            len(pages) == pdf_page_count, len(pages), pdf_page_count
+        ),
+        "empty_ratio_too_high": _check(
+            empty_ratio <= empty_ratio_max, round(empty_ratio, 4), empty_ratio_max
+        ),
+        "thin_pages": _check(True, len(thin), thin_page_chars),
+        "unmapped_pua_codepoints": _check(not unmapped, unmapped),
+        "combining_ratio_too_low": _check(
+            consonants == 0 or marks / consonants >= combining_ratio_min,
+            round(marks / consonants, 4) if consonants else None,
+            combining_ratio_min,
+        ),
+        "no_thai_consonants": _check(consonants > 0, consonants),
+        "scopes_empty": _check(bool(scopes), list(scopes)),
+    }
