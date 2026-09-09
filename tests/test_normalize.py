@@ -1,7 +1,15 @@
 import unicodedata
 
 import pytest
-from ingest.normalize import _running_key, collapse_whitespace, strip_page_furniture, detect_running_lines, strip_running_lines, restore_pua_tone_marks, to_nfc
+from ingest.normalize import (
+    _running_key, 
+    collapse_whitespace, 
+    strip_page_furniture, 
+    detect_running_lines, 
+    strip_running_lines, 
+    restore_pua_tone_marks, 
+    to_nfc
+)
 from ingest.extract import Page
 
 @pytest.mark.parametrize(
