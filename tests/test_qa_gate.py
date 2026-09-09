@@ -1,5 +1,5 @@
 import pytest
-from ingest.qa_gate import qa_gate
+from ingest.qa_gate import failed_checks, qa_gate
 from ingest.extract import Page
 from ingest.normalize import PUA_TO_THAI
 
@@ -13,8 +13,8 @@ def make_pages(texts, start=1):
     return [Page(page_number=i, raw_text=text) for i, text in enumerate(texts, start=start)]
 
 def failed(result):
-    """Check for any result that failed"""
-    return {key for key, value in result.items() if not value["passed"]}
+    """Thin alias: the assertions below read better with a short name."""
+    return failed_checks(result)
 
 @pytest.mark.parametrize(
     "numbers",[

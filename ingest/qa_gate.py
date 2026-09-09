@@ -42,6 +42,16 @@ THAI_COMBINING = re.compile(r"[ัิ-ฺ็-๎]")
 THAI_CONSONANT = re.compile(r"[ก-ฮ]")
 
 
+def failed_checks(qa: dict[str, dict]) -> set[str]:
+    """Names of the checks that failed. Empty set means the document passed.
+
+    Lives here rather than in the caller so run.py, the tests and anything
+    later reading document.qa back out of Postgres all ask the same question
+    the same way.
+    """
+    return {name for name, check in qa.items() if not check["passed"]}
+
+
 def _check(passed: bool, measured, threshold=None) -> dict:
     return {"passed": passed, "measured": measured, "threshold": threshold}
 
