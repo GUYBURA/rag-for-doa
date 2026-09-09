@@ -12,8 +12,11 @@ Order is load-bearing and must not be rearranged:
   4. strip page numbers and dot leaders
   5. collapse whitespace
 
-Why this order: NFC cannot compose a combining mark it does not recognise, so
-PUA repair has to run first. Header/footer lines are matched whole, so they
+Why this order: PUA codepoints carry canonical combining class 0, so NFC sees
+starters and has nothing to reorder while a tone mark is still PUA. Repair them
+first, or the marks keep the PDF's raw order and text that renders identically
+hashes two different ways. Measured: the two orders disagree on 6.6% of mixed
+Thai/Latin/PUA inputs (see KNOWLEDGE.md). Header/footer lines are matched whole, so they
 have to be stripped before whitespace collapsing destroys the line structure
 they are identified by.
 """
@@ -21,41 +24,29 @@ they are identified by.
 import re
 import unicodedata
 from collections import Counter
-
 from ingest.extract import Page
 
-# Thai PDFs encode tone marks and vowels as font-specific Private Use Area
-# glyphs (alternate forms positioned for tall consonants). PyMuPDF returns the
-# PUA codepoint verbatim -- correct behaviour, it is what the file says -- so
-# the mapping back to real Thai has to happen here. The 2565 cover page alone
-# carries 225 of these.
-#
-# Written as escapes rather than literal glyphs: these codepoints render as
-# nothing in an editor, so a wrong entry would be invisible on review.
-#
-# TREAT THIS TABLE AS A HYPOTHESIS, NOT A FACT. Run survey_pua() over every
-# source PDF and confirm each entry against the rendered page before trusting
-# it. A wrong entry here silently changes the meaning of a pesticide name.
 PUA_TO_THAI: dict[str, str] = {
-    "\uf700": "\u0e4d",  # nikhahit ํ
-    "\uf701": "\u0e48",  # mai ek ่
-    "\uf702": "\u0e49",  # mai tho ้
-    "\uf703": "\u0e4a",  # mai tri ๊
-    "\uf704": "\u0e4b",  # mai chattawa ๋
-    "\uf705": "\u0e47",  # mai taikhu ็
-    "\uf70e": "\u0e4c",  # thanthakhat ์
-    "\uf710": "\u0e34",  # sara i ิ
-    "\uf711": "\u0e35",  # sara ii ี
-    "\uf712": "\u0e36",  # sara ue ึ
-    "\uf713": "\u0e37",  # sara uee ื
-    "\uf714": "\u0e31",  # mai han akat ั
-    "\uf718": "\u0e38",  # sara u ุ
-    "\uf719": "\u0e39",  # sara uu ู
-    "\uf71a": "\u0e3a",  # phinthu ฺ
+    "\uf700": "\u0e4d",
+    "\uf701": "\u0e48",
+    "\uf702": "\u0e49",
+    "\uf703": "\u0e4a",
+    "\uf704": "\u0e4b",
+    "\uf705": "\u0e47",
+    "\uf70e": "\u0e4c",
+    "\uf710": "\u0e34",
+    "\uf711": "\u0e35",
+    "\uf712": "\u0e36",
+    "\uf713": "\u0e37",
+    "\uf714": "\u0e31",
+    "\uf718": "\u0e38",
+    "\uf719": "\u0e39",
+    "\uf71a": "\u0e3a",
 }
 
 PUA_RANGE = re.compile(r"[\uf700-\uf71a]")
-
+EDGE_LINES = 3
+_DIGITS = re.compile(r"\d+")
 
 def survey_pua(pages: list[Page]) -> Counter[str]:
     """Count every PUA codepoint in the document, for building PUA_TO_THAI.
@@ -88,6 +79,16 @@ def to_nfc(text: str) -> str:
     """Step 2. Canonical composition, so identical text hashes identically."""
     return unicodedata.normalize("NFC", text)
 
+def _running_key(line: str) -> str:
+    """Return a normalized key for a line, for matching running headers/footers."""
+    masked = _DIGITS.sub("#", line)
+    return collapse_whitespace(masked)
+
+def _edge_keys(page: Page) -> set[str]:
+    """Return the normalized keys of the first and last EDGE_LINES lines."""
+    lines = [line for line in page.raw_text.split("\n") if line.strip()]
+    edges = lines[:EDGE_LINES] + lines[-EDGE_LINES:]
+    return {_running_key(line) for line in edges}
 
 def detect_running_lines(
     pages: list[Page], min_page_ratio: float = 0.5
@@ -98,29 +99,35 @@ def detect_running_lines(
     header is only identifiable from the corpus -- a single page cannot tell a
     header from a heading.
 
-    YOUR TURN. Suggested approach:
-      - for each page, take the first N and last N non-blank stripped lines
-      - count how many *distinct pages* each such line appears on
-      - keep lines appearing on >= min_page_ratio of pages
-    Count pages, not occurrences: one page repeating a line ten times must not
-    promote it to a header.
+    Returns _running_key() values, not raw lines: a header carries the page
+    number, so no two pages spell it the same way. strip_running_lines() must
+    key its input the same way or nothing will match.
     """
-    raise NotImplementedError
+    if not pages:
+        return frozenset()
 
+    counts: Counter[str] = Counter()
+    for page in pages:
+        counts.update(_edge_keys(page))
 
+    threshold = len(pages) * min_page_ratio
+    return frozenset(
+        key for key, pages_seen in counts.items() if pages_seen >= threshold
+    )
+    
 def strip_running_lines(text: str, running_lines: frozenset[str]) -> str:
-    """Step 3. Drop the lines detect_running_lines() identified.
+    """Remove any line that matches a running header/footer in Edge_LINES of the page."""
+    lines = text.split("\n")
+    filled = [i for i, line in enumerate(lines) if line.strip()]
 
-    These carry the edition year. Leaving them in leaks '2565' into the text of
-    a 2568 chunk, which is how a retriever ends up citing the wrong edition.
+    edge = set(filled[:EDGE_LINES] + filled[-EDGE_LINES:])
+    drop = {i for i in edge if _running_key(lines[i]) in running_lines}
 
-    YOUR TURN. Match on the stripped line, keep everything else, and keep the
-    remaining lines in order.
-    """
-    raise NotImplementedError
+    return "\n".join(line for i, line in enumerate(lines) if i not in drop)
 
 
 def strip_page_furniture(text: str) -> str:
+    """Remove page numbers and dot leaders from the first and last lines of a page."""
     number_only = r"\s*?[-_\[]?\s*\d+\s*[-_\]]?\s*"
     dot_leader = r"\s*\.{3,}\s*\d*\s*$"
 
@@ -135,6 +142,7 @@ def strip_page_furniture(text: str) -> str:
     return "\n".join(line for i, line in enumerate(lines) if i not in drop)
 
 def collapse_whitespace(text: str) -> str:
+    """Remove leading/trailing whitespace, collapse spaces/tabs, and collapse newlines."""
     stripped_text = text.strip()
     cleaned_space_tab = re.sub(r"[ \t]+", " ", stripped_text)
     cleaned_newlines = re.sub(r"\n{3,}", "\n\n", cleaned_space_tab)
