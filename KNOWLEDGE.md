@@ -389,3 +389,47 @@ without it, a chunk of dosage numbers still reads like a valid recommendation
 with no way to tell an application rate from a toxicity class — and a confident
 wrong answer with a correct-looking citation is the worst output this system can
 produce.
+
+### Concept: A schema can enforce an invariant and still let you violate it, if nothing ever calls the enforcement
+
+**Definition:** `assert_no_stale_chunks` and `promote_current_edition()` were both already in
+the schema before this session — the SQL that archives a superseded edition and deletes its
+chunks was correct and tested at the database level. What was missing was any Python code
+that ever set `document.status = 'active'` in the first place. `promote_current_edition()`
+only archives documents that are *already* active; nothing promoted a newly-ingested,
+newly-passing document to active at all.
+
+**Why it matters here:** wiring `chunk.py` and `embed.py` into `run.py` made this visible
+immediately. The moment a document passed the QA gate and its chunks were written, running
+`assert_no_stale_chunks` — the view whose whole job is to return zero rows — returned one.
+Not because the archival logic was wrong, but because a `pending` document with chunks
+attached is itself a state invariant 4 doesn't allow: "everything in `chunk` belongs to an
+active edition by construction." A document that never becomes active has no business having
+rows in `chunk` at all, however briefly.
+
+**Solution:** `ingest/promote.py`, one function, `promote_new_document()`: set the new
+document active, then call `promote_current_edition()` — in that order. Order is load-bearing
+and it is the kind of thing a passing test suite would not have caught without a specific
+test for it: `promote_current_edition()`'s coverage check only considers `active` and
+`archived` documents when deciding whether an older edition is now fully covered. Call it
+before the new document is marked active, and the new document is invisible to its own
+coverage check — the older edition it was meant to retire never gets archived, on this call
+or any other, because nothing else ever promotes anything.
+
+Verified by mutation: swapping the two calls in `promote_new_document()` turns a
+should-archive test red without touching the SQL function at all.
+
+**The broader point:** a correct, tested SQL function is not the same claim as "the system
+enforces this invariant." A `CREATE FUNCTION` that nothing calls, or that only some code
+paths call, enforces nothing. The place to check an invariant end to end is the same place
+that would notice if it silently stopped holding — here, that was `assert_no_stale_chunks`
+run right after a real ingest, not a unit test of `promote_current_edition()` in isolation.
+
+**Interview answer:** I found a gap between "the schema has the right constraint" and "the
+system upholds it" — the archival function and its assertion view were both already correct,
+but nothing in the ingestion code ever called the function that would have made a document
+active in the first place, so a passing document's chunks were technically visible to
+retrieval before anything decided the document was live. I fixed it with a single
+promotion function and, more importantly, added the test that would have caught the ordering
+bug I initially wrote into it — reversing which SQL statement runs first breaks the coverage
+check silently, with no error, just a supersession that never happens.

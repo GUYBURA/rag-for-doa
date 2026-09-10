@@ -1,9 +1,16 @@
 import pathlib
 import psycopg
 import pytest
+from dotenv import load_dotenv
 from testcontainers.community.postgres import PostgresContainer
 
-MIGRATIONS = pathlib.Path(__file__).resolve().parent.parent / "db" / "migrations"
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+MIGRATIONS = REPO_ROOT / "db" / "migrations"
+
+# Loaded at collection time, once, for every test in the suite -- not inside a
+# fixture -- because OPENROUTER_API_KEY has to be in os.environ before
+# test_embed.py's skipif() decorators even run.
+load_dotenv(REPO_ROOT / ".env")
 
 
 def _executable(sql: str) -> str:

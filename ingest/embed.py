@@ -1,35 +1,53 @@
-from langchain_ollama import OllamaEmbeddings
-from langchain_postgres import PGVector
+"""Embeddings via OpenRouter. document.embedding_model is pinned per document,
+so changing this constant means re-embedding the active set, not an in-place
+swap -- see CLAUDE.md.
 
-def embed_documents(chunk_documents: list[dict]) -> list[dict]:
-    """
-    Generates embeddings for a list of documents using OllamaEmbeddings.
-    Args:
-        chunk_documents (list[dict]): A list of chunked documents to be embedded.
-    """
-    embeddings_model = OllamaEmbeddings(
-        model="nomic-embed-text-v2-moe:latest",
-        dimensions=768
+Not LangChain: LangChain owns retrieval only, and PGVectorStore consumes
+ready-made vectors, it does not compute them.
+
+OpenRouter rather than calling Vertex directly: Vertex is one of the providers
+OpenRouter routes this model to, so the vector space is the same either way and
+a later move to calling Vertex directly needs no re-embedding, just a base_url
+and credential swap.
+"""
+
+import os
+
+from openai import OpenAI
+
+EMBEDDING_MODEL = "google/gemini-embedding-001"
+DIMENSIONS = 768
+
+
+def _client() -> OpenAI:
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
 
-    embedded_documents = []
-    for chunk in chunk_documents:
-        embedding = embeddings_model.embed_query(chunk["page_content"])
-        embedded_documents.append({
-            'page_content': chunk["page_content"],
-            'embedding': embedding
-        })
-    return embedded_documents
 
-def store_embeddings(embedded_documents: list[dict], db_connection) -> None:
+def embed_texts(texts: list[str], *, model: str = EMBEDDING_MODEL) -> list[list[float]]:
+    """Embed a batch of already-chunked, already-normalized text.
+
+    Raises if any vector comes back the wrong length. chunk.embedding is
+    vector(768) NOT NULL: a silently-wrong dimension would either be rejected
+    by Postgres mid-insert, or -- if it happened to match by coincidence --
+    pinned into document.embedding_model as though the model had worked, and
+    every later query against it would return nonsense.
     """
-    Stores the embedded documents in a database.
-    Args:
-        embedded_documents (list[dict]): A list of embedded documents to be stored.
-        db_connection: A database connection object.
-    """
-    vector_store = PGVector(
-        embeddings=embedded_documents,
-        connection=db_connection,
-        collection_name="chunk"
+    if not texts:
+        return []
+
+    response = _client().embeddings.create(
+        model=model, input=texts, dimensions=DIMENSIONS
     )
+    vectors = [item.embedding for item in response.data]
+
+    for vector in vectors:
+        if len(vector) != DIMENSIONS:
+            raise ValueError(
+                f"{model} returned a {len(vector)}-dimensional vector, "
+                f"expected {DIMENSIONS}"
+            )
+
+    return vectors
