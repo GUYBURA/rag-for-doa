@@ -40,7 +40,7 @@ that use them (2568 has none; 2565 has 225).
 
 import re
 
-from ingest.extract import Page
+from ingest.extract import Page, Table
 from ingest.normalize import PUA_RANGE, PUA_TO_THAI
 
 # The whole Basic Multilingual Plane private use area. PUA_RANGE is the Thai
@@ -70,6 +70,7 @@ def qa_gate(
     *,
     pdf_page_count: int,
     scopes: list[str],
+    tables: list[Table] | None = None,
     empty_ratio_max: float = 0.5,
     combining_ratio_min: float = 0.20,
     thin_page_chars: int = 50,
@@ -113,5 +114,10 @@ def qa_gate(
             combining_ratio_min,
         ),
         "no_thai_consonants": _check(consonants > 0, consonants),
+        # Measured, never blocking, and None when the caller passed nothing:
+        # a document with no tables is legitimate, and this stage cannot tell
+        # "no tables" from "tables missed". None keeps "not measured" apart
+        # from "measured zero" in an old qa row.
+        "tables_found": _check(True, None if tables is None else len(tables)),
         "scopes_empty": _check(bool(scopes), list(scopes)),
     }

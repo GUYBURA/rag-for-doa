@@ -1,7 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 from ingest.db import connect, find_document_by_hash, insert_pending_document, update_qa
-from ingest.extract import extract_pages, page_count
+from ingest.extract import extract_pages, extract_tables, page_count
 from ingest.qa_gate import failed_checks, qa_gate
 
 PARSER = "pymupdf"
@@ -32,7 +32,13 @@ def ingest(conn, pdf_path: str, meta: DocumentMeta) -> dict:
     """คืน qa ทั้งก้อน ผู้เรียกดูเองว่าผ่านไหมด้วย failed_checks()"""
     pages = extract_pages(pdf_path)
     pages_in_pdf = page_count(pdf_path)
-    qa = qa_gate(pages, pdf_page_count=pages_in_pdf, scopes=meta.scopes)
+    # Locating tables costs 24-40 seconds on a full volume. It happens here
+    # rather than in extract_pages() so that anything only wanting text does
+    # not pay for it, and chunk.py will want this same list next.
+    tables = extract_tables(pdf_path)
+    qa = qa_gate(
+        pages, pdf_page_count=pages_in_pdf, scopes=meta.scopes, tables=tables
+    )
     digest = file_hash256(pdf_path)
     existing = find_document_by_hash(conn, digest)
 

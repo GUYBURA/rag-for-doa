@@ -12,6 +12,10 @@ Pages, and the trap each one carries:
                 -> catches an extract.py that strips or trims
   3  2565 p220  193 PUA tone marks, the most of any page in any edition
                 -> catches an extract.py that repairs text before qa_gate sees it
+  4  2568 p56   dosage tables, the 11-column layout the whole corpus uses
+                -> catches a table extractor that reads cells through
+                   PyMuPDF's own table text methods, which reorder Thai
+                   below-vowels onto separate lines
 
 Deliberately excluded: 2568 p299 (no text, 2,579 vector drawings) and p300
 (image-only back cover). Either one takes the fixture from 116 KB to ~900 KB,
@@ -32,6 +36,7 @@ PAGES = [
     ("data/raw/2568.pdf", 9),
     ("data/raw/2568.pdf", 54),
     ("data/raw/2565.pdf", 219),
+    ("data/raw/2568.pdf", 55),
 ]
 OUT = pathlib.Path(__file__).parent / "excerpt.pdf"
 

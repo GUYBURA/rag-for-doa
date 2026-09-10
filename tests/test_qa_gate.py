@@ -1,7 +1,11 @@
+import pathlib
+
 import pytest
 from ingest.qa_gate import failed_checks, qa_gate
-from ingest.extract import Page
+from ingest.extract import Page, extract_tables
 from ingest.normalize import PUA_TO_THAI
+
+EXCERPT = pathlib.Path(__file__).resolve().parent / "fixtures" / "excerpt.pdf"
 
 THAI_OK = "สวัสดี คุณชื่ออะไร เราชื่อบยัปป์"
 THAI_NO_MARKS = "สวสด คณชออะไร เราชอบยปป"
@@ -128,3 +132,23 @@ def test_symbol_pua_does_not_hide_an_unmapped_thai_pua():
     result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
     assert "unmapped_pua_codepoints" in failed(result)
     assert result["symbol_pua_codepoints"]["measured"] == ["U+F061"]
+
+def test_tables_found_is_measured_but_never_blocking():
+    pages = make_pages([THAI_OK] * 3)
+    tables = extract_tables(str(EXCERPT))
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"], tables=tables)
+    assert "tables_found" not in failed(result)
+    assert result["tables_found"]["measured"] == len(tables)
+
+def test_tables_not_measured_is_none_not_zero():
+    # A caller that never looked and a document that genuinely has no tables
+    # must not leave the same record behind.
+    pages = make_pages([THAI_OK] * 3)
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
+    assert result["tables_found"]["measured"] is None
+    assert "tables_found" not in failed(result)
+
+def test_no_tables_measures_zero():
+    pages = make_pages([THAI_OK] * 3)
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"], tables=[])
+    assert result["tables_found"]["measured"] == 0
