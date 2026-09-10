@@ -1,0 +1,118 @@
+# Gold set for query/retrieve.py, run against the real local corpus (Docker,
+# 2565/2566 archived, 2568 active - see PROMPT.md). Not synthetic: every
+# expect_contains string below was read out of an actual chunk in that corpus
+# (see the sampling in KNOWLEDGE.md / session notes), not invented from memory
+# of the PDFs.
+#
+# Fields:
+#   id               short, stable across edits so a regression is easy to name
+#   question         Thai, as a user would type it
+#   answerable       true = a passage should exist; false = correct behaviour
+#                     is "no relevant document" further down the pipeline.
+#                     retrieve.py has no refusal logic itself (that is
+#                     rerank.py's job) - this field is scored as "the top
+#                     result should NOT resemble a confident answer", i.e.
+#                     expect_contains is absent and expect_section is null.
+#   expect_contains  substring that must appear in at least one of the top-k
+#                     retrieved passages, verbatim, for the question to score
+#                     as a hit. Case-sensitive, since Latin chemical/pathogen
+#                     names are exact strings in the source.
+#   expect_section   the crop heading the right table sits under, or null.
+#                     Checked against passage.section on the SAME hit that
+#                     satisfied expect_contains, not on the top rank alone -
+#                     a question can be answered by a passage that isn't first.
+#   k                cutoff for recall@k on this question. Defaults to 5 (the
+#                     size rerank.py will eventually cut candidates to) when
+#                     omitted.
+
+- id: q01_chilli_anthracnose_active_ingredient
+  question: โรคแอนแทรคโนสในพริกใช้สารอะไรกำจัด
+  answerable: true
+  expect_contains: "โพรคลอราซ"
+  expect_section: "พริก (Chilli)"
+
+- id: q02_chilli_anthracnose_pathogen_latin
+  question: เชื้อราที่ทำให้เกิดโรคแอนแทรคโนสในพริกชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Colletotrichum"
+  expect_section: "พริก (Chilli)"
+
+- id: q03_mango_anthracnose_rate
+  question: อัตราการใช้สารป้องกันโรคแอนแทรคโนสในมะม่วง
+  answerable: true
+  expect_contains: "อะซอกซีสโตรบิน"
+  expect_section: "มะม่วง (Mango)"
+
+- id: q04_mango_leafhopper_latin
+  question: เพลี้ยจักจั่นมะม่วงมีชื่อวิทยาศาสตร์ว่าอะไร
+  answerable: true
+  expect_contains: "Idioscopus"
+  expect_section: "มะม่วง (Mango)"
+
+- id: q05_grape_scab
+  question: โรคสแคปในองุ่นเกิดจากเชื้อราอะไร
+  answerable: true
+  expect_contains: "Sphaceloma"
+  expect_section: "องุ่น (Grape)"
+
+- id: q06_coffee_anthracnose_dose
+  question: โรคแอนแทรคโนสในกาแฟใช้เบโนมิลอัตราเท่าไหร่
+  answerable: true
+  expect_contains: "เบโนมิล"
+  expect_section: "กาแฟ (Coffee)"
+
+- id: q07_coffee_berry_borer_latin
+  question: มอดเจาะผลกาแฟชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Hypothenemus"
+  expect_section: "กาแฟ (Coffee)"
+
+- id: q08_cassava_anthracnose
+  question: มันสำปะหลังเป็นโรคแอนแทรคโนสใช้สารป้องกันกำจัดชนิดใด
+  answerable: true
+  expect_contains: "คอปเปอร์"
+  expect_section: "มันสำปะหลัง (Cassava)"
+
+- id: q09_soybean_rust
+  question: โรคราสนิมในถั่วเหลืองเกิดจากเชื้อราอะไร และใช้สารอะไรป้องกัน
+  answerable: true
+  expect_contains: "Phakopsora"
+  expect_section: "ถั่วเหลือง (Soybean)"
+
+- id: q10_mungbean_stemfly_latin
+  question: หนอนแมลงวันเจาะต้นถั่วเขียวชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Ophiomyia"
+  expect_section: "ถั่วเขียว (Mung bean)"
+
+- id: q11_within_table_row_disambiguation
+  # The twin of q10: same crop, same table, a *different* pest row
+  # (หนอนม้วนใบถั่ว vs. q10's หนอนแมลงวันเจาะต้นถั่ว). Getting expect_section
+  # right for both q10 and q11 is easy for any retriever that just returns
+  # "the mung bean table" - what this pair actually checks is that the passage
+  # containing the row for THIS pest ranks first, not merely a passage from
+  # the right table.
+  question: หนอนม้วนใบถั่วเขียวใช้สารอะไรกำจัด
+  answerable: true
+  expect_contains: "อินดอกซาคาร์บ"
+  expect_section: "ถั่วเขียว (Mung bean)"
+
+- id: q12_out_of_domain
+  # Not pesticide guidance at all. No passage in this corpus should look like
+  # a confident answer; a retriever with no notion of relevance still returns
+  # its 20 nearest vectors regardless, which is exactly the failure mode
+  # rerank.py's threshold exists to catch downstream.
+  question: วิธีต้มส้มตำให้อร่อยทำอย่างไร
+  answerable: false
+  expect_contains: null
+  expect_section: null
+
+- id: q13_fabricated_active_ingredient
+  # A chemical name that does not exist in this corpus (or, as far as this
+  # project knows, in reality). Distinct failure mode from q12: this one is
+  # on-topic, so a dense-only retriever is more likely to return a plausible-
+  # looking but wrong table for it.
+  question: ใช้ไซโคลฟอสมิน (fictional) กำจัดโรคพืชได้อัตราเท่าไหร่
+  answerable: false
+  expect_contains: null
+  expect_section: null

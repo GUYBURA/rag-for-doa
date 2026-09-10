@@ -1,17 +1,20 @@
 import unicodedata
 
 import pytest
+
+from ingest.extract import Page
 from ingest.normalize import (
     PUA_TO_THAI,
-    _running_key, 
-    collapse_whitespace, 
-    strip_page_furniture, 
-    detect_running_lines, 
-    strip_running_lines, 
-    restore_pua_tone_marks, 
-    to_nfc
+    _running_key,
+    collapse_whitespace,
+    detect_running_lines,
+    normalize_query,
+    restore_pua_tone_marks,
+    strip_page_furniture,
+    strip_running_lines,
+    to_nfc,
 )
-from ingest.extract import Page
+
 
 @pytest.mark.parametrize(
     "given_text, expected_text",
@@ -178,3 +181,37 @@ def test_pua_repair_must_run_before_nfc():
 
     assert correct_order != swapped_order
     assert correct_order == unicodedata.normalize("NFC", correct_order)
+
+def test_normalize_query_canonicalizes_mark_order():
+    # Thai marks do not compose under NFC, but they are reordered by canonical
+    # combining class. A tone mark typed before a below-vowel and one typed
+    # after it are two different strings that render identically -- and would
+    # embed and tokenize differently against a corpus that is already NFC.
+    tone_first = "\u0e1b\u0e4b\u0e38"
+    vowel_first = "\u0e1b\u0e38\u0e4b"
+
+    assert tone_first != vowel_first
+    assert normalize_query(tone_first) == normalize_query(vowel_first)
+
+
+def test_normalize_query_repairs_pasted_pua():
+    # A question can be pasted straight out of one of these PDFs.
+    assert normalize_query("ส\uf70aงออก") == "ส\u0e48งออก"
+
+
+def test_normalize_query_raises_on_an_unmapped_pua_codepoint():
+    # Same evidence rule as the ingest path: searching for a codepoint that
+    # matches nothing by construction is worse than refusing to search.
+    with pytest.raises(ValueError):
+        normalize_query("ก\uf707")
+
+
+def test_normalize_query_collapses_whitespace():
+    assert normalize_query("  โรค   ราสนิม  ") == "โรค ราสนิม"
+
+
+def test_normalize_query_keeps_a_question_that_is_only_a_number():
+    # The twin. Steps 3 and 4 are page-shaped: strip_page_furniture() deletes a
+    # line that is nothing but a number, which is a page number on a page and a
+    # legitimate question here.
+    assert normalize_query("2568") == "2568"

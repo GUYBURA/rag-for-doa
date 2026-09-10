@@ -1,9 +1,10 @@
 """The only place text is normalized. Invariant 8.
 
-Normalized text is never stored. It is a *derivation key*: the embedding, the
-content_sha256 dedup hash and the content_tsv tokens are all computed from it,
-while chunk.content keeps the raw text for citation. Three derivations, one
-input, so they cannot drift apart.
+Normalized text is what chunk.content stores, and it is also the *derivation
+key*: the embedding, the content_sha256 dedup hash and the content_tsv tokens
+are all computed from that same string. Four uses, one input, so they cannot
+drift apart -- and a query has to enter through normalize_query() for the same
+reason, or it is compared against text derived differently from itself.
 
 Order is load-bearing and must not be rearranged:
   1. PUA tone marks -> real Thai codepoints
@@ -24,6 +25,7 @@ they are identified by.
 import re
 import unicodedata
 from collections import Counter
+
 from ingest.extract import Page
 
 PUA_TO_THAI: dict[str, str] = {
@@ -188,3 +190,25 @@ def normalize(text: str, running_lines: frozenset[str] = frozenset()) -> str:
     text = strip_running_lines(text, running_lines)
     text = strip_page_furniture(text)
     return collapse_whitespace(text)
+
+
+def normalize_query(question: str) -> str:
+    """Steps 1, 2 and 5 for a user's question. Same three steps as a table,
+    for a different reason.
+
+    A query is matched against text that already went through NFC, so it has to
+    go through NFC too. A question typed with its vowel and tone mark in the
+    other keyboard order composes to a different string: the dense side sees a
+    different token sequence and the sparse side's newmm segmentation splits it
+    somewhere else, so both halves of hybrid retrieval degrade at once and
+    neither reports anything wrong.
+
+    Steps 3 and 4 are page-shaped - a question has no running header and no
+    page number to strip.
+
+    PUA repair stays in, and stays loud. A question can be pasted out of one of
+    these PDFs and carry U+F700-U+F71A with it, and an unmapped codepoint is
+    the same missing evidence here as anywhere else. Searching for a character
+    that matches nothing by construction is worse than refusing to search.
+    """
+    return collapse_whitespace(to_nfc(restore_pua_tone_marks(question)))

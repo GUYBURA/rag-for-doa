@@ -31,6 +31,7 @@ dependencies = [
   "langsmith",
   "openai>=3.11.0",
   "python-dotenv>=1.2.3",
+  "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

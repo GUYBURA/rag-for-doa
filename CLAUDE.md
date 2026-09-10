@@ -190,8 +190,12 @@ constructs; the admin UI will build one from a form, and until then a script or 
 inside `ingest()` on the passing path — there is no standalone command for it yet, and no
 retroactive/admin re-promotion flow.
 
-Not written yet, so the commands do not exist: `db/seed.sql`, `eval/run_eval.py`,
-`app/main.py`.
+`eval/run_eval.py` exists and is run by hand (`uv run python -m eval.run_eval`):
+it needs a database with the real corpus ingested, which CI does not have, so
+it is not part of the test suite.
+
+Not written yet, so the command does not exist: `db/seed.sql`, `app/main.py`,
+`query/rerank.py`, `query/prompt.py`, `query/guards.py`.
 
 ## Conventions
 
