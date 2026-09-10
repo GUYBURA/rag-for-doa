@@ -537,3 +537,56 @@ found this way, before a single test was written, each because a specific
 line does something the docstring doesn't mention — a config mutated in
 place, a validation that downgrades instead of raising. All three would have
 passed a design review based on the public API alone."
+
+### Concept: Hybrid retrieval = two independent rankings, fused by rank alone
+**Definition:** `retrieve()` runs two searches that never touch each other's
+scoring, then merges the two *orderings* — not the two score sets — into one.
+
+Dense half: `normalize_query(question)` -> `OpenRouterEmbeddings.embed_query()`
+(the same `embed_texts()` call, same pinned model, as ingestion) -> a 768-dim
+vector -> cosine distance against `chunk.embedding` via the `hnsw` index. This
+half never sees `word_tokenize` or Thai segmentation at all; a vector has no
+concept of words.
+
+Sparse half: `fts_query(question)` -> PyThaiNLP `newmm` tokens joined by
+spaces -> `plainto_tsquery('simple', ...)` -> `ts_rank_cd` against
+`chunk.content_tsv`. This half never touches the embedding model; a
+`tsvector` has no concept of semantic similarity, only which tokens are
+present.
+
+Each half independently produces its own ranked list of chunk ids with its
+own scores, in units that share nothing: cosine distance lives in [0, 2],
+`ts_rank_cd` is an unbounded weighted term-frequency score. Reciprocal Rank
+Fusion (`reciprocal_rank_fusion` in `langchain_postgres.v2.hybrid_search_config`)
+combines the two lists by throwing away both score sets and keeping only
+*rank*:
+
+```python
+score[doc_id] += 1.0 / (rank_in_this_list + rrf_k)   # rrf_k = 60 (library default)
+```
+
+summed across whichever of the two lists a chunk appears in, then the merged
+list is sorted by that sum, descending. A chunk that ranks #1 in both lists
+scores highest; a chunk that only one half found still scores something
+(diminishing with how far down that list it sits) rather than zero.
+
+**Why it matters here:** RRF's whole point is that "rank #1" means the same
+thing regardless of what scoring scheme produced it, so two searches with
+incompatible score units can be combined without normalizing either one.
+The library's alternative, `weighted_sum_ranking`, instead min-max normalizes
+raw scores *within each search's own result set* before combining, which is
+exactly the mechanism behind the "fusion score is not a relevance gate" entry
+above — a search that finds nothing relevant still produces a top score of
+1.0 after that normalization, because min-max only knows about the results it
+was given, never about whether any of them are any good. RRF has the same
+underlying limitation (rank-based scores are still relative to one query's own
+result set, never absolute across queries), but at least does not additionally
+require the two halves' raw scores to be on a comparable scale, which
+weighted-sum silently assumes and gets wrong here.
+**Interview answer:** "The two retrieval methods score in units that don't
+compare — cosine distance and a term-frequency rank aren't the same kind of
+number. RRF sidesteps that by fusing on rank position instead of raw score,
+so I don't have to normalize two incompatible scales into one. What it
+doesn't solve is absolute relevance — a fused score is still only meaningful
+relative to the other candidates in that one search, which is why the refusal
+threshold has to come from a reranker, not from retrieval's own output."
