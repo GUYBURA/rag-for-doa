@@ -1,4 +1,5 @@
 import pathlib
+
 import psycopg
 import pytest
 from dotenv import load_dotenv
@@ -53,5 +54,68 @@ def db_conn(postgres_url):
     a commit, so one rollback here undoes the whole test.
     """
     with psycopg.connect(postgres_url) as conn:
+        yield conn
+        conn.rollback()
+
+
+CORPUS_DB = "corpus"
+
+
+def _with_database(url: str, name: str) -> str:
+    base, _, _ = url.rpartition("/")
+    return f"{base}/{name}"
+
+
+@pytest.fixture(scope="session")
+def corpus_url(postgres_url):
+    """A second database in the same container, holding a committed corpus.
+
+    Retrieval cannot use the db_conn fixture. PGVectorStore opens its own
+    asyncpg pool, so it sees only committed rows, while db_conn's whole
+    isolation strategy is to never commit. Committing into the main test
+    database instead would be visible to every other test -- test_run.py
+    asserts `SELECT count(*) FROM document` is 1 -- so retrieval gets a
+    database of its own.
+
+    Nothing is deleted at teardown, and nothing needs to be: the container goes
+    away at the end of the session, and invariant 3 forbids deleting document
+    rows anyway.
+    """
+    with psycopg.connect(postgres_url, autocommit=True) as admin:
+        admin.execute(f'CREATE DATABASE "{CORPUS_DB}"')
+
+    url = _with_database(postgres_url, CORPUS_DB)
+    with psycopg.connect(url) as conn:
+        for migration in sorted(MIGRATIONS.glob("*.sql")):
+            conn.execute(_executable(migration.read_text(encoding="utf-8")))
+        conn.commit()
+    yield url
+
+
+@pytest.fixture(scope="session")
+def ingested_corpus(corpus_url):
+    """Ingest the fixture PDF into the corpus database, once, and commit.
+
+    Session-scoped because it costs a real embedding call. Every retrieval test
+    reads the same rows and none of them write, so sharing is safe.
+    """
+    from ingest.run import DocumentMeta, ingest
+
+    meta = DocumentMeta(
+        source="excerpt.pdf",
+        title_th="เอกสารทดสอบ",
+        edition_year_be=2568,
+        scopes=["fungicide", "insecticide", "herbicide"],
+    )
+    with psycopg.connect(corpus_url) as conn:
+        ingest(conn, str(REPO_ROOT / "tests" / "fixtures" / "excerpt.pdf"), meta)
+        conn.commit()
+    yield corpus_url
+
+
+@pytest.fixture
+def corpus_conn(ingested_corpus):
+    """A read-only-by-convention connection to the ingested corpus."""
+    with psycopg.connect(ingested_corpus) as conn:
         yield conn
         conn.rollback()

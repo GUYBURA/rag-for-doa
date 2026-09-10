@@ -433,3 +433,73 @@ retrieval before anything decided the document was live. I fixed it with a singl
 promotion function and, more importantly, added the test that would have caught the ordering
 bug I initially wrote into it — reversing which SQL statement runs first breaks the coverage
 check silently, with no error, just a supersession that never happens.
+
+### Concept: A hybrid retrieval library can silently downgrade to dense-only
+**Definition:** `PGVectorStore.create_sync()` validates the `tsv_column` named
+in `HybridSearchConfig` against `information_schema.columns`, and if it is
+missing or not a `tsvector`, it does not raise — it blanks
+`hybrid_search_config.tsv_column` to `""` on the object it was handed and
+returns a store that runs dense search only. Every call after that succeeds
+and returns plausible-looking results.
+**Why it matters here:** `chunk.content_tsv` exists and is a real `tsvector`,
+so this exact failure mode does not fire today — but a typo'd column name, a
+migration that renames it, or reusing this code against a table that lacks it
+would all produce a working-looking retrieval path with silently no lexical
+half. Caught by reading the config back after `create_sync()` returns and
+raising if `tsv_column` isn't what was asked for — `make_store()` does this as
+`assert_hybrid_enabled()`, and `test_a_blanked_tsv_column_is_an_error_not_a_silent_downgrade`
+proves the check actually fires on a blanked config.
+**Interview answer:** "The library's failure mode for a bad hybrid config
+isn't an exception, it's degradation — the object it hands back looks
+identical whether hybrid search is on or off. I read the config back after
+construction and raise if the column I asked for isn't the column I got,
+because silent degradation to dense-only is worse than crashing at startup."
+
+### Concept: A shared config object across independent calls is stateful by accident
+**Definition:** `langchain-postgres`'s hybrid search writes the caller's
+question into `hybrid_search_config.fts_query` when that field is empty, and
+the write lands on the same object the caller passed in. A config built once
+and reused across searches keeps whatever `fts_query` the *first* search gave
+it — every later search's dense half tracks the new question correctly while
+its lexical half silently re-runs the first question's keywords.
+**Why it matters here:** Nothing about this raises or looks wrong from the
+call site; a fixed threshold or fixed test question would never catch it,
+because most retrieval quality signal still comes from the dense half. Fixed
+by building a fresh `HybridSearchConfig` per call (`hybrid_config()` in
+`query/retrieve.py`) and never storing one on the vector store or reusing one
+across questions. `test_the_second_question_is_not_searched_with_the_first_questions_words`
+spies on the config actually handed to `similarity_search_with_score` across
+two consecutive questions and asserts the second call's `fts_query` matches
+the second question, not the first — this failed with a clear rank mismatch
+under mutation (config built once, reused) while every other test in the file
+still passed, which is exactly the "looks fine, isn't" shape this class of bug
+takes.
+**Interview answer:** "A library handed a mutable config object may treat it
+as a place to stash state between calls, not just read from. I build one per
+call and never share it, and the regression test that catches this is a spy on
+two consecutive calls, not a single-call assertion — a single call can't tell
+correct behaviour from lucky behaviour."
+
+### Concept: RRF/weighted-sum fusion scores are not a relevance gate
+**Definition:** Both fusion strategies `langchain-postgres` ships normalize
+within one result set — weighted-sum min-maxes scores so the best result of
+*any* search is 1.0, and reciprocal rank fusion is a function of rank alone,
+with no term for whether row 1 is actually relevant to the question. A search
+that finds nothing relevant produces the same shape of score distribution as
+one that finds the exact answer.
+**Why it matters here:** Invariant 11 requires "below-threshold reranking ->
+refuse", and a threshold set against a fusion score would never fire, because
+a bad search's top score looks identical to a good search's top score. This is
+why `Passage.fusion_score` exists but `retrieve()` never compares it to
+anything — the threshold has to come from a reranker that judges one passage
+against one question in absolute terms (`rerank.py`, not yet built). Confirmed
+against the real corpus: `eval/run_eval.py`'s `q12_out_of_domain` (a Thai food
+recipe question against a pesticide corpus) and `q13_fabricated_active_ingredient`
+(an invented chemical name) both return a full top-5 candidate list with
+ordinary-looking fusion scores — there is nothing in retrieval's own output
+that flags either as unanswerable.
+**Interview answer:** "Fusion scores answer 'which of these results is best',
+not 'is any of these results good' — they're relative by construction. The
+threshold that lets the system refuse has to come from a reranker that scores
+a passage against a question on an absolute scale, so I keep retrieval's score
+around for debugging but never gate on it."
