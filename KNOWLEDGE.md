@@ -76,3 +76,186 @@ produce the other, so the dedup hash splits identical content. I did not reach f
 it is far too aggressive for a document full of chemical names and percentages. The narrow
 fix belongs in the PUA mapping step, and I want occurrence counts from the real PDFs before
 committing to it.
+
+### Concept: A combining-mark ratio detects deletion, not reordering
+
+**Definition:** The QA gate's Thai health check is
+`count(combining marks) / count(Thai consonants)` over the whole document. Consonants are
+the denominator because they are what a broken parser leaves untouched: dropped vowels and
+tone marks shrink the numerator while the denominator stays fixed, so the signal is clean.
+Using *all* characters as the denominator would make the ratio track how much ASCII a page
+holds — chemical names, percentages, dosage tables — rather than how damaged the Thai is.
+
+Measured on `data/raw/2568.pdf` (raw text, pre-normalize):
+
+```
+marks 53,483 / consonants 161,382 = 0.3314      per-page median 0.3267
+lowest page p288 = 0.1863                        PUA marks 0
+pages with zero Thai consonants: 299, 300 (the two blank pages)
+```
+
+Floor set at **0.10** — a 3.3x margin at document level. The floor is deliberately a
+statement about the Thai language ("real Thai prose always carries marks"), not a fit to
+2568, so it survives 2565 and 2566 arriving with different densities.
+
+**Why it matters here:** the check is much weaker than it looks, and invariant 7 is the
+reason to be precise about it. pdfplumber both *reordered and dropped* marks on 2568. A
+ratio sees only the dropping half — reordering leaves the count identical, so a document
+whose marks are all in the wrong order passes at any threshold.
+
+Even for dropping, coverage is partial. Marks by class, and the ratio that survives if a
+parser loses a whole class:
+
+```
+upper vowels (ั ิ ี ึ ื ํ)  48.6%  ->  0.170   passes a 0.10 floor
+tone marks   (่ ้ ๊ ๋)      35.3%  ->  0.215   passes
+lower vowels (ุ ู ฺ)        10.2%  ->  0.298   passes
+```
+
+Losing every upper vowel in the book — about as bad as Thai damage gets — clears the gate
+comfortably. Only near-total loss (upper vowels *and* tone marks, 84% of all marks) drops to
+0.053 and fails.
+
+**Rejected: raising the floor to 0.20.** It would catch the upper-vowel case, but leaves
+only a 1.65x margin, still passes lower-vowel loss, and 2566 comes from a different
+publication series whose natural density is unmeasured. Buying one failure mode at the cost
+of false-failing a healthy edition is a bad trade, and a threshold that gets nudged whenever
+a document fails is not a gate.
+
+**The right fix, deferred:** assert each mark *class* is present at all. Every genuine Thai
+document contains upper vowels, lower vowels and tone marks; a class at zero is impossible
+in real text and needs no tuned number. That is a separate check, not a different threshold.
+Not added yet — 0.10 ships first, with the gap recorded here.
+
+**Interview answer:** The gate checks combining marks per Thai consonant, denominated on
+consonants because they are invariant under the failure being detected. I measured 0.33 on
+the live document and set the floor at 0.10, treating it as a fact about written Thai rather
+than a curve fit, so it generalizes to editions I have not ingested. What I want to be
+honest about is its reach: it catches deletion, never reordering, and I broke the marks down
+by class to show that even losing every upper vowel still clears the floor. Tightening the
+threshold does not fix that — the real answer is a per-class presence check, which I scoped
+as separate work rather than pretending one number covers it.
+
+### Concept: The PUA is not one range, and symbol fonts hide real characters in it
+
+**Definition:** Unicode's Private Use Area is U+E000–U+F8FF. `PUA_TO_THAI` and `PUA_RANGE`
+cover only U+F700–U+F71A, the sub-range Thai fonts use for pre-positioned tone marks.
+Legacy symbol fonts — SymbolMT, Wingdings — use U+F0xx instead, mapping their glyph at byte
+`0xNN` to `U+F0NN`. PyMuPDF reports what the PDF encodes, so those glyphs arrive as PUA
+codepoints too, and a scan limited to the Thai sub-range reports zero.
+
+Measured across all three editions:
+
+```
+2568  593 PUA total    0 in F700-F71A    F07E x586, F061 x3, F072 x3, F022 x1
+2565  233 PUA total  225 in F700-F71A    F061 x3, F072 x3, F022 x1, F097 x1
+2566    0 PUA
+```
+
+The project's working assumption was "2568 has no PUA". It has 593. The number came from
+`survey_pua()`, which is bounded by `PUA_RANGE`.
+
+Identified by rendering each glyph from the PDF at 8x rather than by reading a font table:
+
+```
+U+F061  SymbolMT     α   "กลุ่มเคมี α-Chloroacetamides"      -> part of a chemical group name
+U+F072  Wingdings3   △   used as Δ in "Δ14-reductase"        -> FRAC mode-of-action text
+U+F022  Wingdings3   →   "Δ8→Δ7-isomerase"                    -> same sentence
+U+F07E  SymbolMT     ∼   flanks headings, x586                -> decoration
+U+F097  Wingdings2   (renders blank), x1
+```
+
+**Why it matters here:** α, Δ and → are content. They sit inside chemical group names and
+FRAC mode-of-action descriptions — exactly the text a question about a pesticide's mode of
+action would have to retrieve. Today they reach `chunk.content` as U+F061 and friends, so
+they are unsearchable, they cannot render, and they change `content_sha256` for lines that
+are otherwise identical across editions.
+
+The QA gate does not catch this. `unmapped_pua_codepoints` scans `PUA_RANGE`, so a document
+with 593 unrepaired PUA characters passes cleanly. The check is narrower than its name
+suggests.
+
+**Not fixed yet.** Widening the range touches both `normalize.py` step 1 and the gate, which
+CLAUDE.md gates behind sign-off, and the mapping is not a single table: U+F061 means α only
+because the span's font is SymbolMT. The same codepoint under a different font is a
+different character, so a font-blind table would be wrong by construction. Any fix has to
+read the span font, which means `extract.py` would have to carry font information it does
+not carry today — a change to the Page contract, not a lookup table.
+
+**Interview answer:** I found 593 private-use codepoints in a document our tooling reported
+as having none, because the survey was scoped to the Thai tone-mark sub-range while the file
+also embeds SymbolMT and Wingdings. I identified them by rendering the glyphs out of the PDF
+rather than trusting a font chart, and three of them are semantic — alpha, delta and an
+arrow inside chemical group names and FRAC mode-of-action text. The fix is not a bigger
+lookup table: the same codepoint means different things under different fonts, so a correct
+repair needs font context from the extraction layer, which changes the Page contract. I
+recorded it and left the pipeline alone rather than guessing a mapping into chemical names.
+
+### Concept: A font stores one tone mark at several codepoints, chosen by the glyph underneath
+
+**Definition:** THSarabunPSK does not render a Thai tone mark from one PUA codepoint. It
+keeps several *positional variants* of the same mark — one drawn for a plain consonant, one
+raised or shifted for a consonant with an ascender (ป ฟ ฝ ล) or an upper vowel already in
+the slot — and the PDF producer emits whichever variant it drew. So U+F702, U+F706 and
+U+F70B are three codepoints that all mean ้ (mai tho).
+
+**Why it matters here:** the QA gate blocked 2565 on
+`unmapped_pua_codepoints = [U+F706, U+F708, U+F70A, U+F70B]` — 174 of the 225 PUA characters
+in the file. `PUA_TO_THAI` had the F701–F705 block and F70E, so the whole positional-variant
+block was missing and `restore_pua_tone_marks()` would have raised on every real page of the
+document. The gate did exactly its job: the failure surfaced before anything was chunked.
+
+Identified by rendering the glyph out of the PDF and reading the word it produces, never
+from a font chart:
+
+```
+U+F70A x85  ส<pua>งออก  -> ส่งออก     ่  U+0E48
+U+F70B x71  ใช<pua>สาร  -> ใช้สาร     ้  U+0E49
+U+F706 x15  ป<pua>องกัน -> ป้องกัน     ้  U+0E49   (follows ป, อ — ascenders)
+U+F708 x3   ปุ<pua>ย    -> ปุ๋ย        ๋  U+0E4B
+```
+
+F708's isolated clip rendered blank, and all three occurrences sit on page 220, the page that
+extracts with reversed lines. It was resolved from the reversed context instead: the raw run
+`ย<pua>ุป` read backwards is `ปุ<pua>ย`, and the only Thai word there is ปุ๋ย.
+
+**Deliberately not filled in:** F707, F709, F70C, F70D. They complete the block by symmetry,
+but they occur in none of the three editions, so there is no evidence for what they are.
+Guessing would put an unverified tone mark inside a pesticide name; leaving them out means
+the gate blocks loudly the first time one appears. A wrong tone mark is a different, still
+valid Thai word — the failure would be invisible downstream.
+
+**Interview answer:** the gate blocked an edition on four unmapped private-use codepoints. I
+identified all four by rendering the glyphs and reading the resulting words, not by trusting
+a font table, and the answer was that the font keeps positional variants of the same tone
+mark at several codepoints. I mapped the four I had evidence for and left the four I did not,
+because the cost of a wrong mapping is a silently different Thai word and the cost of a
+missing one is a loud failure I already know how to read.
+
+
+### Concept: Three independent books agreeing tightens a threshold that one book could not
+
+**Definition:** `combining_ratio_min` is a floor on Thai combining marks per Thai consonant.
+It was set at 0.10 when 2568 was the only measurement — a 3.3x margin, chosen wide because a
+single document cannot tell you how much a *different* document legitimately varies.
+
+**Why it matters here:** all three volumes now measure within 1% of each other.
+
+```
+2568  0.3314    2565  0.3345    2566  0.3324
+```
+
+2566 is insecticide-only from a different publication series, so this is not one house style
+measured three times. The spread is a property of written Thai, not of one book, which is
+what a threshold documented as a language fact needs in order to be one. Raised to **0.20**:
+still 1.66x margin on every observed document, and now above 0.170 — the score a book gets
+after losing every upper vowel, which 0.10 passed. That failure mode is the exact damage
+pdfplumber caused on 2568 (invariant 7), so it is the one worth catching.
+
+Unchanged: this catches deletion only. Reordered marks leave the count identical.
+
+**Interview answer:** I set a parse-quality floor at 3.3x margin from a single measurement,
+then tightened it to 1.66x once two more documents from a different publication series landed
+within 1% of the first. The point of the second number was that the tighter floor is above
+the score a document gets when it loses an entire class of vowels — with the loose floor,
+the exact corruption the check exists to catch would have passed.

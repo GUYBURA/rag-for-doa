@@ -29,6 +29,12 @@ ingest/
   chunk.py         # prose and table strategies live here, not in extract.py
   embed.py         # embedding + model version pinning
   promote.py       # supersession. The only place that deletes chunks.
+  db.py            # psycopg connection + document writes. Every direct SQL
+                   # statement in the ingest path lives here, not scattered
+                   # across stages.
+  run.py           # orchestrates one document: extract -> qa_gate -> write.
+                   # Takes metadata as a DocumentMeta it is handed; it does not
+                   # read title/edition/scopes from anywhere itself.
 query/
   guards.py        # input (PII, injection) and output (PII, grounding) guards
   retrieve.py      # hybrid dense + sparse, via PGVectorStore
@@ -49,6 +55,9 @@ Placement rules that matter more than the tree itself:
 - Normalization happens **only** in `normalize.py`. No ad-hoc `.strip()` or regex cleanup in
   `extract.py` or `chunk.py`.
 - `app/main.py` is a transport layer. Logic belongs in `query/`.
+- `title_th`, `edition_year_be` and `scopes` are entered by a human and reach the pipeline
+  as a `DocumentMeta` argument. Until the admin UI exists, callers construct one directly.
+  No stage infers them from the PDF — invariant 1.
 - Schema truth lives in `db/migrations/001_init.sql`. Read it rather than trusting any
   summary, including this file.
 
@@ -115,7 +124,10 @@ vowels and tone marks. PyMuPDF extracts the same file with zero errors. This was
 not assumed. If PyMuPDF lacks something you need, raise it rather than swapping parsers.
 
 **8. Never index text that hasn't been through `normalize.py`.** Order matters:
-1. PUA tone marks `U+F700`–`U+F71A` → real Thai codepoints (the 2565 cover page has 225)
+1. PUA tone marks `U+F700`–`U+F71A` → real Thai codepoints (225 in 2565, spread over pages
+   1, 2 and 220 — not only the cover). This range is the *Thai* slice of the private use
+   area. 2568 carries 593 private-use characters from SymbolMT and Wingdings at `U+F0xx`
+   that nothing here repairs, three of them real content (α, Δ, →). See LOG.md.
 2. Unicode NFC
 3. Strip headers/footers (they contain the edition year and leak into chunk text)
 4. Strip page numbers and dot leaders
@@ -139,19 +151,20 @@ grounding check to make the system look more responsive.
 
 ## Commands
 
-<!-- TODO: replace with real commands; keep this section accurate, the agent relies on it -->
-
 ```bash
 uv sync
-psql "$DATABASE_URL" -f db/migrations/001_init.sql
-psql "$DATABASE_URL" -f db/seed.sql
-python -m ingest.run data/raw/2568.pdf
-python -m ingest.promote
+docker compose up -d                  # pgvector/pg17; applies 001_init.sql on first boot
+docker compose down -v                # reset: drops the volume, schema reapplies on next up
 pytest
-pytest tests/test_promote.py -q       # fast check: no chunks survive archival
-python eval/run_eval.py
-uvicorn app.main:app --reload
+pytest -m "not requires_source_pdfs"  # what CI runs; source PDFs are gitignored
+python tests/fixtures/make_fixture.py # rebuild the extract fixture from the source PDFs
 ```
+
+`ingest.run` has no CLI. `ingest(conn, pdf_path, meta)` takes a `DocumentMeta` the caller
+constructs; the admin UI will build one from a form, and until then a script or test does.
+
+Not written yet, so the commands do not exist: `db/seed.sql`, `ingest.promote`,
+`eval/run_eval.py`, `app/main.py`.
 
 ## Conventions
 

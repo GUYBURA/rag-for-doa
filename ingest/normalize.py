@@ -33,6 +33,20 @@ PUA_TO_THAI: dict[str, str] = {
     "\uf703": "\u0e4a",
     "\uf704": "\u0e4b",
     "\uf705": "\u0e47",
+    # Positional variants: the font stores one mark at more than one codepoint,
+    # chosen by the shape of the consonant under it. Identified by rendering the
+    # glyph and reading the word it sits in, not from a font chart:
+    #   F706 x15  ปอง   -> ป้อง   (follows an ascender: ป, อ)
+    #   F708 x3   ปุย    -> ปุ๋ย    (all three on 2565 p220, which extracts reversed)
+    #   F70A x85  สงออก -> ส่งออก
+    #   F70B x71  ใชสาร -> ใช้สาร
+    # F707/F709/F70C/F70D stay out on purpose: they occur in none of the three
+    # editions, so there is no evidence for what they are, and the QA gate
+    # blocks loudly if one ever appears.
+    "\uf706": "\u0e49",
+    "\uf708": "\u0e4b",
+    "\uf70a": "\u0e48",
+    "\uf70b": "\u0e49",
     "\uf70e": "\u0e4c",
     "\uf710": "\u0e34",
     "\uf711": "\u0e35",

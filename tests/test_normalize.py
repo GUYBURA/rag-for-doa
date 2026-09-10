@@ -1,7 +1,16 @@
 import unicodedata
 
 import pytest
-from ingest.normalize import _running_key, collapse_whitespace, strip_page_furniture, detect_running_lines, strip_running_lines, restore_pua_tone_marks, to_nfc
+from ingest.normalize import (
+    PUA_TO_THAI,
+    _running_key, 
+    collapse_whitespace, 
+    strip_page_furniture, 
+    detect_running_lines, 
+    strip_running_lines, 
+    restore_pua_tone_marks, 
+    to_nfc
+)
 from ingest.extract import Page
 
 @pytest.mark.parametrize(
@@ -143,8 +152,14 @@ def test_leaves_normal_thai_untouched():
     assert restore_pua_tone_marks(given) == given
 
 def test_raises_on_unmapped_pua():
-    with pytest.raises(ValueError, match=r"U\+F706"):
-        restore_pua_tone_marks("ก" + "\uf706")
+    # Picked from the range at run time, not hardcoded: F706 used to be the
+    # example here and then became mapped, which would turn this test green
+    # for the wrong reason.
+    unmapped = next(
+        chr(c) for c in range(0xF700, 0xF71B) if chr(c) not in PUA_TO_THAI
+    )
+    with pytest.raises(ValueError, match=rf"U\+{ord(unmapped):04X}"):
+        restore_pua_tone_marks("ก" + unmapped)
 
 def test_nfc_composes_latin_combining_marks():
     given = "Nicotiana tabacum var. Bre" + "\u0301" + "sil"   # e + acute
