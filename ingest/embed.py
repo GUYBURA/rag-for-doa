@@ -18,6 +18,11 @@ from openai import OpenAI
 EMBEDDING_MODEL = "google/gemini-embedding-001"
 DIMENSIONS = 768
 
+# Vertex's own limit, hit for real ingesting 2565.pdf (423 chunks in one call):
+# "batchSize value of 423 but the supported range is from 1 (inclusive) to 251
+# (exclusive)". 200 leaves margin below that ceiling.
+MAX_BATCH = 200
+
 
 def _client() -> OpenAI:
     return OpenAI(
@@ -29,6 +34,11 @@ def _client() -> OpenAI:
 def embed_texts(texts: list[str], *, model: str = EMBEDDING_MODEL) -> list[list[float]]:
     """Embed a batch of already-chunked, already-normalized text.
 
+    Split into requests of at most MAX_BATCH: a full volume produces well
+    over 250 chunks (2565.pdf alone made 423), and the API rejects a request
+    that large outright rather than truncating it. Order is preserved, since
+    the caller zips this return value against the same chunk list positionally.
+
     Raises if any vector comes back the wrong length. chunk.embedding is
     vector(768) NOT NULL: a silently-wrong dimension would either be rejected
     by Postgres mid-insert, or -- if it happened to match by coincidence --
@@ -38,10 +48,15 @@ def embed_texts(texts: list[str], *, model: str = EMBEDDING_MODEL) -> list[list[
     if not texts:
         return []
 
-    response = _client().embeddings.create(
-        model=model, input=texts, dimensions=DIMENSIONS
-    )
-    vectors = [item.embedding for item in response.data]
+    client = _client()
+    vectors: list[list[float]] = []
+
+    for start in range(0, len(texts), MAX_BATCH):
+        batch = texts[start : start + MAX_BATCH]
+        response = client.embeddings.create(
+            model=model, input=batch, dimensions=DIMENSIONS
+        )
+        vectors.extend(item.embedding for item in response.data)
 
     for vector in vectors:
         if len(vector) != DIMENSIONS:
