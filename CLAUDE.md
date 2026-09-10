@@ -23,7 +23,9 @@ db/
     001_init.sql   # full schema, hand-maintained. Source of truth.
   seed.sql         # local dev only
 ingest/
-  extract.py       # PyMuPDF only. Raw text out, no cleaning.
+  extract.py       # PyMuPDF only. Raw text out, no cleaning. Also owns table
+                   # geometry and cell text (extract_tables), because both come
+                   # out of PyMuPDF — how a table is split is chunk.py's.
   normalize.py     # the 5-step Thai pipeline. Nothing else normalizes text.
   qa_gate.py       # blocking checks. Writes document.qa. No bypass.
   chunk.py         # prose and table strategies live here, not in extract.py
@@ -122,6 +124,13 @@ justification.
 pdfplumber silently corrupts Thai combining marks on the 2568 file — reordered and dropped
 vowels and tone marks. PyMuPDF extracts the same file with zero errors. This was measured,
 not assumed. If PyMuPDF lacks something you need, raise it rather than swapping parsers.
+
+The same rule applies inside PyMuPDF. `table.extract()`, `table.to_markdown()` and
+`table.header.names` group spans by vertical position, which puts a Thai below-vowel on its
+own line — measured combining ratios on one table: 0.3267 from `get_text`, 0.2796 from
+`extract()` with marks displaced, 0.0432 from `to_markdown()`. Table cells are read with
+`page.get_text("text", clip=cell_rect)`. Any layout algorithm that infers reading order from
+vertical position is unsafe here, whoever ships it.
 
 **8. Never index text that hasn't been through `normalize.py`.** Order matters:
 1. PUA tone marks `U+F700`–`U+F71A` → real Thai codepoints (225 in 2565, spread over pages

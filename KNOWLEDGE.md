@@ -259,3 +259,57 @@ then tightened it to 1.66x once two more documents from a different publication 
 within 1% of the first. The point of the second number was that the tighter floor is above
 the score a document gets when it loses an entire class of vowels — with the loose floor,
 the exact corruption the check exists to catch would have passed.
+
+### Concept: A table finder and a text extractor disagree about where a Thai vowel is
+
+**Definition:** PyMuPDF's `find_tables()` returns geometry *and* text, and the two
+come from different code paths. `page.get_text("text")` reads the page's own
+content stream in reading order. `table.extract()`, `table.to_markdown()` and
+`table.header.names` reconstruct cell text by grouping spans on vertical
+position, because that is how you tell one table row from the next.
+
+Thai breaks that assumption. A below-vowel like ู renders lower than the
+consonant it belongs to, so a position-based grouper reads it as its own line.
+
+**Why it matters here:** measured on 2568 page 56, one table, three methods:
+
+```
+page.get_text("text")   combining ratio 0.3267   'ศัตรูพืช'
+table.extract()         combining ratio 0.2796   'ศัตรพชื\nู'
+table.to_markdown()     combining ratio 0.0432   marks mostly gone
+```
+
+The dosage tables are the highest-value text in the corpus — they carry the
+application rates — so reading them through the lossy path would corrupt exactly
+the passages a user is most likely to act on.
+
+This is the same failure as invariant 7, where pdfplumber was measured against
+PyMuPDF and rejected for reordering and dropping Thai marks on the same file. It
+is worth naming as a class rather than an incident: **any layout algorithm that
+infers reading order from vertical position is unsafe for Thai**, and the tool's
+own name on the box is not evidence that it is safe.
+
+**Solution:** use `find_tables()` for geometry only — the table bbox and each
+cell's rectangle — and read every cell with
+`page.get_text("text", clip=cell_rect)`, the extractor that was already
+validated. Verified across the corpus: the concatenated markdown of all tables
+scores 0.3338 / 0.3297 / 0.3281 for 2565 / 2566 / 2568, against raw-page ratios
+of 0.3345 / 0.3324 / 0.3314.
+
+**Two things a ratio cannot see.** `table.extract()` still scores 0.2796, above
+the 0.20 gate floor, because the marks are all still present — just attached to
+the wrong characters. Deletion moves a ratio; displacement does not. The
+regression test therefore asserts the corrupted spelling `ศัตรพชื` is absent as
+well as the correct `ศัตรูพืช` being present. Confirmed by mutation: switching
+the implementation to `table.extract()` leaves the ratio test green and only the
+spelling test red.
+
+**Interview answer:** PyMuPDF finds tables well and reads their text badly, at
+least in Thai, because cell text is reassembled from vertical position and a Thai
+below-vowel sits on its own baseline. I measured three extraction paths on the
+same table and got combining-mark ratios of 0.33, 0.28 and 0.04, then used the
+finder for geometry and the trusted text extractor for content, which brought the
+whole corpus back in line with the raw pages. The part I would want a reviewer to
+notice is that the ratio check alone would not have caught the middle case: the
+marks were all there, on the wrong letters, so the test had to name the corrupted
+word.
