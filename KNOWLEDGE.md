@@ -503,3 +503,37 @@ not 'is any of these results good' — they're relative by construction. The
 threshold that lets the system refuse has to come from a reranker that scores
 a passage against a question on an absolute scale, so I keep retrieval's score
 around for debugging but never gate on it."
+
+### Concept: Read the installed library's own source before designing against it
+**Definition:** Before writing `query/retrieve.py`, the plan for it came from
+reading `.venv/Lib/site-packages/langchain_postgres/v2/*.py` at the exact
+pinned version (`0.0.17`) directly — `async_vectorstore.py`,
+`hybrid_search_config.py`, `engine.py` — rather than from its README or from
+prior knowledge of what a "hybrid search library" is expected to do. Three of
+the four design questions asked before writing any code (the reranker choice
+aside) came directly out of that reading: the `plainto_tsquery`/newmm mismatch,
+the shared-config `fts_query` mutation, and `create_sync()`'s silent
+`tsv_column` blanking are all specific to what this version of this library's
+code actually does on this line, not properties of "hybrid search" in general.
+**Why it matters here:** All three would have shipped invisibly. Every one of
+them produces output that looks like a working hybrid search — correct-shaped
+`Document` objects, plausible scores, no exception — and differs only in
+*which* rows come back and in what order. A design based on the library's
+advertised behavior (`HybridSearchConfig` exists, therefore hybrid search
+works) would have written `retrieve.py` in under an hour and shipped all three
+bugs with it; none of CLAUDE.md's invariants would have caught them, because
+none of them are about retrieval correctness at the library-integration level
+— they assume retrieval sees what `chunk` actually holds. The asymmetry is
+what makes the reading worth doing: a wrong assumption about a pinned
+dependency costs the same to find via source-reading before writing code as it
+does via a failing eval after ingesting the whole corpus and running real
+questions against it, except the second way costs an embedding budget and a
+debugging session that starts from "why is recall bad" with no leads.
+**Interview answer:** "For a pinned third-party dependency doing something
+load-bearing, I read its actual installed source at the version I'm on before
+designing around it, not its docs and not my prior assumptions about what that
+category of library does. The three retrieval bugs in this project were all
+found this way, before a single test was written, each because a specific
+line does something the docstring doesn't mention — a config mutated in
+place, a validation that downgrades instead of raising. All three would have
+passed a design review based on the public API alone."
