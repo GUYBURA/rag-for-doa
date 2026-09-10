@@ -164,6 +164,23 @@ def collapse_whitespace(text: str) -> str:
     cleaned_text = "\n".join(line.rstrip() for line in lines)
     return cleaned_text
 
+def normalize_table(markdown: str) -> str:
+    """Steps 1, 2 and 5 for a rendered table. Steps 3 and 4 are page-shaped.
+
+    A table has no running header and no page number of its own - those belong
+    to the page it sits on and are stripped there. Running them here would be
+    worse than useless: strip_page_furniture()'s dot-leader rule would trim a
+    cell that legitimately ends in an ellipsis, and strip_running_lines() looks
+    at the first and last lines of its input, which for a table are the header
+    row and the last row of data.
+
+    Steps 1 and 2 are not optional. content_sha256 has to match across editions
+    for the dedup index to do anything, and an unrepaired PUA tone mark or an
+    uncomposed sequence hashes differently while rendering identically.
+    """
+    return collapse_whitespace(to_nfc(restore_pua_tone_marks(markdown)))
+
+
 def normalize(text: str, running_lines: frozenset[str] = frozenset()) -> str:
     """Run the five steps in order. The only entry point other modules call."""
     text = restore_pua_tone_marks(text)

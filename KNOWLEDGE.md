@@ -313,3 +313,79 @@ whole corpus back in line with the raw pages. The part I would want a reviewer t
 notice is that the ratio check alone would not have caught the middle case: the
 marks were all there, on the wrong letters, so the test had to name the corrupted
 word.
+
+### Concept: On a page built around a table, the page text and the table are the same text
+
+**Definition:** A PDF page has no notion of "the table" and "the prose around
+it". `get_text("text")` returns every character on the page in reading order,
+including everything printed inside the table's ruled lines. A table extractor
+returns those same characters a second time, arranged as cells. Chunk the page
+*and* chunk the table and the corpus now holds each recommendation twice.
+
+**Why it matters here:** measured on 2568, the share of a page's characters that
+sit inside a table bounding box:
+
+```
+page 56   1,609 chars total   1,457 inside tables   91%
+page 60   1,069                 960                 90%
+page 100  1,916               1,648                 86%
+```
+
+So this is not a small overlap to be tidied up later — on a table page the table
+*is* the page, and the leftover 9–14% is the crop heading, a spraying note, the
+page number and the running footer.
+
+Two copies would not be caught by anything downstream. `content_sha256` is
+computed over the text, and the flat page text and the markdown rendering of the
+same table differ in every pipe and line break, so `chunk_dedup_idx` sees two
+distinct rows. Both then sit in the same vector neighbourhood and compete for
+the same top-5 slots, which halves the effective diversity of a retrieval that
+is already limited to five passages.
+
+**Solution:** a page contributes its tables as markdown, plus only the blocks
+whose rectangle overlaps no table rectangle. That needs geometry, which is why
+`extract.py` grew `Block(page_number, bbox, text)` alongside `Page.raw_text` —
+`raw_text` is the same text with the coordinates thrown away, and the
+coordinates are exactly what this decision needs.
+
+**A table part without its header row is worse than no chunk at all.** 2568's
+tables run to 3,358 characters against a 1,800-character budget, so long ones
+are split — at row boundaries, never mid-row, and every part repeats the header
+row and its separator. Without that, the second part of a dosage table reads:
+
+```
+|โรคใบจุด|แมนโคเซบ 80% WP|40 กรัม|
+```
+
+and nothing in it says whether `40 กรัม` is the application rate, the amount of
+active ingredient, or an LD50 value. The chunk still looks like a complete,
+citable recommendation, and the citation still points at the right page. That is
+the failure mode this corpus punishes hardest: not a missing answer, a confident
+wrong one that survives review.
+
+Measured after splitting: 276 tables in 2568 become 376 parts, longest 2,148
+characters. The parts over budget are single rows longer than the budget, which
+are emitted whole on purpose.
+
+**Section comes from geometry too, and only from the same page.** The crop name
+("มันสำปะหลัง (Cassava)") is printed above the table, outside it. It is found by
+taking the blocks whose bottom edge is above the table's top edge and walking
+*upward* — nearest first. Page 56 carries three tables and three crops; walking
+downward instead gives all three tables the first crop's name, which is a silent
+wrong answer rather than a crash.
+
+Roughly half the dosage tables get no section, because they continue from the
+previous page and carry no heading of their own. Carrying the last-seen heading
+forward would cover them — and would eventually attach the wrong crop to a
+table. A missing section is visibly missing; a wrong one reads as fact.
+
+**Interview answer:** the obvious way to chunk a document with tables is to chunk
+the text and chunk the tables. I measured first and found that 86–91% of the text
+on a table page is *inside* the tables, so that approach indexes the important
+content twice in two different shapes that no deduplication catches. I used the
+block geometry to take the tables plus only the text outside them. The rule I
+would defend hardest is that every part of a split table repeats the header row:
+without it, a chunk of dosage numbers still reads like a valid recommendation
+with no way to tell an application rate from a toxicity class — and a confident
+wrong answer with a correct-looking citation is the worst output this system can
+produce.

@@ -39,6 +39,20 @@ def extract_pages(pdf_path: str) -> list[Page]:
 
 
 @dataclass(frozen=True)
+class Block:
+    """One text block with its position on the page.
+
+    Page.raw_text is the same text with the geometry thrown away. chunk.py
+    needs the geometry to tell which text sits inside a table and must not be
+    chunked twice, and only this module is allowed to touch PyMuPDF.
+    """
+
+    page_number: int
+    bbox: tuple[float, float, float, float]
+    text: str
+
+
+@dataclass(frozen=True)
 class Table:
     """One table PyMuPDF located, with its text read back out by get_text().
 
@@ -110,9 +124,6 @@ def extract_tables(pdf_path: str) -> list[Table]:
                 cells = tuple(
                     tuple(
                         _cell_text(page, rect)
-                        # A row can carry fewer rects than the table has
-                        # columns where cells are merged; pad so every row has
-                        # the same width and markdown stays rectangular.
                         for rect in list(row.cells)
                         + [None] * (found.col_count - len(row.cells))
                     )
@@ -129,6 +140,20 @@ def extract_tables(pdf_path: str) -> list[Table]:
                     )
                 )
     return tables
+
+
+def extract_blocks(pdf_path: str) -> list[Block]:
+    """Every text block with its rectangle, in page order.
+
+    Cheap: no table detection is involved, so this costs about what
+    extract_pages() costs.
+    """
+    with pymupdf.open(pdf_path) as doc:
+        return [
+            Block(page_number=page.number + 1, bbox=tuple(block[:4]), text=block[4])
+            for page in doc
+            for block in page.get_text("blocks")
+        ]
 
 
 def page_count(pdf_path: str) -> int:
