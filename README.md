@@ -108,7 +108,10 @@ answer quality:
 ## Status
 
 In progress. Ingestion is being built stage by stage, and each stage lands with the tests
-that prove it before the next one starts.
+that prove it before the next one starts — 68 of them so far, run in CI on every push,
+including the ones that need a real database.
+
+All three editions are in hand and all three pass the gate.
 
 **Working**
 
@@ -126,25 +129,52 @@ that prove it before the next one starts.
   identical but hash differently, which quietly breaks deduplication. There is a test that
   fails if anyone reorders the steps.
 
+- **Parsing QA gate** — nine checks over the raw text: page numbering and page-count
+  cross-check, blank-page ratio, thin pages, unmapped Thai PUA, symbol-font PUA, Thai
+  combining-mark ratio, presence of Thai at all, and presence of the hand-entered subject
+  scopes. Each check records what it measured and the threshold it was judged against, not
+  just a pass or fail, because the reason is what has to survive in the database.
+
+  The combining-mark floor is the interesting one. It counts Thai marks per Thai consonant,
+  since a parser that drops vowels leaves the consonants untouched. All three volumes land
+  within 1% of each other — 0.3314, 0.3345, 0.3324 — across two different publication
+  series, which is what makes it a fact about written Thai rather than about one book.
+
+- **Ingestion writes** — one document row per volume, written through psycopg, with the
+  full QA record stored as JSON. Re-ingesting a file already in the database updates it in
+  place while it is still pending, and is refused outright once it is live or archived.
+  Document rows are never deleted; that is the audit trail.
+
+  Tested against a real Postgres with pgvector in a container, not a mock, since the
+  guarantees that matter here are schema-level. Each test runs inside a transaction that is
+  rolled back, so no test can see another's rows.
+
 **Next**
 
-- **Parsing QA gate** — page-count cross-check, blank-page ratio, image-without-text
-  detection, unmapped PUA, and validation that the hand-entered subject scopes are present.
-  A document that fails is recorded and left unprocessed; there is no bypass.
 - **Chunking** — prose and dosage tables need different strategies. Splitting a dosage table
   mid-row produces a chunk that states the wrong application rate, which is the most
   consequential failure this corpus allows.
-- **Storage, embedding, and supersession** — these need a real Postgres with pgvector under
-  test, since the guarantees that matter here are schema-level and cannot be mocked.
+- **Embedding and supersession** — model version pinned per document, and archival that
+  removes a superseded edition's passages from search while keeping its record.
 
 **Known gaps**
 
-- Only the 2568 edition is in hand. Supersession cannot be tested end to end until 2565 and
-  2566 are available, since there is nothing yet to archive.
-- The PUA repair table is a hypothesis. The 2568 file contains no PUA characters at all — it
-  is the 2565 cover page that carries them — so the mapping is unverified against a real
-  document. The code raises on any unmapped PUA rather than dropping it silently, so the
-  first 2565 ingest will say so loudly rather than corrupting a chemical name.
+- The QA gate measures and records, but nothing is blocked yet: there is no chunking stage
+  for a failed document to be kept out of. The check that enforces it belongs with the
+  chunker, and lands with it.
+- The 2565 volume carries 225 private-use characters where tone marks should be, and the
+  gate blocked it on four of them. All four are now identified — by rendering the glyphs out
+  of the PDF and reading the resulting words, not by trusting a font chart — and the font
+  turns out to store one tone mark at several codepoints, picked by the shape of the
+  consonant underneath. Four more codepoints complete that block by symmetry but appear in
+  no edition, so they are deliberately left unmapped: a guessed tone mark is a silently
+  different Thai word, while a missing one is a loud failure.
+- Both compendium editions also carry glyphs from symbol fonts in a different part of the
+  private use area, three of which are real content — an alpha, a delta and an arrow inside
+  chemical group names. Repairing them needs to know which font each span used, which the
+  extraction layer does not currently carry, so for now every occurrence is counted and
+  recorded per document rather than silently passed through.
+- One page of the 2565 volume extracts with a handful of its lines reversed.
 - Subject scopes are entered by hand, which makes supersession dependent on a human getting
   them right. The QA gate checks they are present; it cannot check they are correct.
 - The retrieval side, evaluation set, and service have not been started.
