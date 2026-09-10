@@ -29,6 +29,8 @@ dependencies = [
   "structlog",
   "tenacity",
   "langsmith",
+  "openai>=3.11.0",
+  "python-dotenv>=1.2.3",
 ]
 
 [dependency-groups]
@@ -41,4 +43,5 @@ package = false
 pythonpath = ["."]
 markers = [
   "requires_source_pdfs: needs data/raw/*.pdf, which are gitignored and absent in CI",
+  "requires_embeddings: needs OPENROUTER_API_KEY, which CI does not have",
 ] 

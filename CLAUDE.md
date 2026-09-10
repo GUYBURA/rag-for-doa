@@ -98,7 +98,16 @@ not narrow it back to `A.scopes @> B.scopes`.
 Archiving an edition means `status = 'archived'`, `archived_at = now()`, and deleting its
 chunks. `document` is the audit trail — `title_th`, `scopes`, `page_count`, `chunk_count`,
 `qa`, `file_hash` must survive so re-ingestion from the source PDF is verifiable. **No
-`DELETE FROM document` anywhere.** `DELETE FROM chunk` belongs only in `promote.py`.
+`DELETE FROM document` anywhere.** `DELETE FROM chunk` for archival belongs only inside
+`promote_current_edition()` in the schema, invoked only from `promote.py`'s
+`promote_new_document()` — never called directly from `db.py` or `run.py`. There is no
+separate review step: `run.py` calls `promote_new_document()` the instant a document has
+passed the QA gate and been chunked and embedded, so a document goes live and any edition
+it fully supersedes is archived in the same transaction. The one other place a chunk row is
+deleted is `db.py`'s `delete_chunks_for_document()`, called only when re-ingesting a
+document that is still `pending` — a document that was never `active` has nothing to
+retire from search, and clearing its old chunks first is what keeps a failing re-ingest at
+zero chunks and a passing one from colliding with `chunk_dedup_idx`.
 
 **4. Never filter on edition or status in the retrieval path.**
 Everything in `chunk` belongs to an active edition by construction. A `WHERE status =
@@ -142,9 +151,14 @@ vertical position is unsafe here, whoever ships it.
 4. Strip page numbers and dot leaders
 5. Collapse whitespace
 
-`chunk.content` stores **raw** text; `chunk.content_sha256` hashes **normalized** text. Do
-not conflate them — the hash is what catches duplicates, and ~48% of 2568's prose lines are
-identical to 2565's after normalization.
+`chunk.content` stores **normalized** text, and `chunk.content_sha256` hashes that same
+text — the two are deliberately the same string, computed once in `chunk.py`. Raw text
+never reaches `chunk` at all: `chunk_document()` normalizes each page (and each table,
+through `normalize_table()`) before ever building a `Chunk`, because the running footer
+that step 3 strips carries the edition year, and a chunk embedded with "2568" baked into it
+would still be findable after 2568 is superseded. The hash is what catches duplicates, and
+~48% of 2568's prose lines are identical to 2565's after normalization — computing it from
+anything other than what gets embedded would make the dedup index compare the wrong thing.
 
 **9. The parsing QA gate is blocking.**
 A document failing page-count, table/layout extraction, OCR confidence, or Thai
@@ -172,8 +186,12 @@ python tests/fixtures/make_fixture.py # rebuild the extract fixture from the sou
 `ingest.run` has no CLI. `ingest(conn, pdf_path, meta)` takes a `DocumentMeta` the caller
 constructs; the admin UI will build one from a form, and until then a script or test does.
 
-Not written yet, so the commands do not exist: `db/seed.sql`, `ingest.promote`,
-`eval/run_eval.py`, `app/main.py`.
+`ingest.promote` exists but has one function, `promote_new_document()`, called only from
+inside `ingest()` on the passing path — there is no standalone command for it yet, and no
+retroactive/admin re-promotion flow.
+
+Not written yet, so the commands do not exist: `db/seed.sql`, `eval/run_eval.py`,
+`app/main.py`.
 
 ## Conventions
 
