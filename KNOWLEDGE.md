@@ -190,3 +190,72 @@ arrow inside chemical group names and FRAC mode-of-action text. The fix is not a
 lookup table: the same codepoint means different things under different fonts, so a correct
 repair needs font context from the extraction layer, which changes the Page contract. I
 recorded it and left the pipeline alone rather than guessing a mapping into chemical names.
+
+### Concept: A font stores one tone mark at several codepoints, chosen by the glyph underneath
+
+**Definition:** THSarabunPSK does not render a Thai tone mark from one PUA codepoint. It
+keeps several *positional variants* of the same mark — one drawn for a plain consonant, one
+raised or shifted for a consonant with an ascender (ป ฟ ฝ ล) or an upper vowel already in
+the slot — and the PDF producer emits whichever variant it drew. So U+F702, U+F706 and
+U+F70B are three codepoints that all mean ้ (mai tho).
+
+**Why it matters here:** the QA gate blocked 2565 on
+`unmapped_pua_codepoints = [U+F706, U+F708, U+F70A, U+F70B]` — 174 of the 225 PUA characters
+in the file. `PUA_TO_THAI` had the F701–F705 block and F70E, so the whole positional-variant
+block was missing and `restore_pua_tone_marks()` would have raised on every real page of the
+document. The gate did exactly its job: the failure surfaced before anything was chunked.
+
+Identified by rendering the glyph out of the PDF and reading the word it produces, never
+from a font chart:
+
+```
+U+F70A x85  ส<pua>งออก  -> ส่งออก     ่  U+0E48
+U+F70B x71  ใช<pua>สาร  -> ใช้สาร     ้  U+0E49
+U+F706 x15  ป<pua>องกัน -> ป้องกัน     ้  U+0E49   (follows ป, อ — ascenders)
+U+F708 x3   ปุ<pua>ย    -> ปุ๋ย        ๋  U+0E4B
+```
+
+F708's isolated clip rendered blank, and all three occurrences sit on page 220, the page that
+extracts with reversed lines. It was resolved from the reversed context instead: the raw run
+`ย<pua>ุป` read backwards is `ปุ<pua>ย`, and the only Thai word there is ปุ๋ย.
+
+**Deliberately not filled in:** F707, F709, F70C, F70D. They complete the block by symmetry,
+but they occur in none of the three editions, so there is no evidence for what they are.
+Guessing would put an unverified tone mark inside a pesticide name; leaving them out means
+the gate blocks loudly the first time one appears. A wrong tone mark is a different, still
+valid Thai word — the failure would be invisible downstream.
+
+**Interview answer:** the gate blocked an edition on four unmapped private-use codepoints. I
+identified all four by rendering the glyphs and reading the resulting words, not by trusting
+a font table, and the answer was that the font keeps positional variants of the same tone
+mark at several codepoints. I mapped the four I had evidence for and left the four I did not,
+because the cost of a wrong mapping is a silently different Thai word and the cost of a
+missing one is a loud failure I already know how to read.
+
+
+### Concept: Three independent books agreeing tightens a threshold that one book could not
+
+**Definition:** `combining_ratio_min` is a floor on Thai combining marks per Thai consonant.
+It was set at 0.10 when 2568 was the only measurement — a 3.3x margin, chosen wide because a
+single document cannot tell you how much a *different* document legitimately varies.
+
+**Why it matters here:** all three volumes now measure within 1% of each other.
+
+```
+2568  0.3314    2565  0.3345    2566  0.3324
+```
+
+2566 is insecticide-only from a different publication series, so this is not one house style
+measured three times. The spread is a property of written Thai, not of one book, which is
+what a threshold documented as a language fact needs in order to be one. Raised to **0.20**:
+still 1.66x margin on every observed document, and now above 0.170 — the score a book gets
+after losing every upper vowel, which 0.10 passed. That failure mode is the exact damage
+pdfplumber caused on 2568 (invariant 7), so it is the one worth catching.
+
+Unchanged: this catches deletion only. Reordered marks leave the count identical.
+
+**Interview answer:** I set a parse-quality floor at 3.3x margin from a single measurement,
+then tightened it to 1.66x once two more documents from a different publication series landed
+within 1% of the first. The point of the second number was that the tighter floor is above
+the score a document gets when it loses an entire class of vowels — with the loose floor,
+the exact corruption the check exists to catch would have passed.

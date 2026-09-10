@@ -14,12 +14,14 @@ documents in general, not fits to any one edition, and the threshold actually
 used is recorded alongside each measurement so an old qa row stays readable
 after a default changes.
 
-combining_ratio_min = 0.10: marks per Thai consonant. Consonants are the
+combining_ratio_min = 0.20: marks per Thai consonant. Consonants are the
 denominator because a parser that drops vowels leaves them untouched. Measured
-on data/raw/2568.pdf: 53,483 / 161,382 = 0.3314, a 3.3x margin. Known gap: this
-catches deletion only. Reordered marks (invariant 7's other failure mode) leave
-the count identical, and losing every upper vowel in the book still scores
-0.170. See KNOWLEDGE.md.
+on all three source volumes: 2568 0.3314, 2565 0.3345, 2566 0.3324 — a spread
+under 1% across two different publication series, which is what justifies a
+floor this close to the observed value. It leaves a 1.66x margin and, unlike
+0.10, is above the 0.170 a book scores after losing every upper vowel. Known
+gap: this catches deletion only. Reordered marks (invariant 7's other failure
+mode) leave the count identical. See KNOWLEDGE.md.
 
 unmapped_pua_codepoints scans PUA_RANGE, the Thai tone-mark sub-range, and so
 is blind to the U+F0xx private-use characters that SymbolMT and Wingdings
@@ -62,7 +64,7 @@ def qa_gate(
     pdf_page_count: int,
     scopes: list[str],
     empty_ratio_max: float = 0.5,
-    combining_ratio_min: float = 0.10,
+    combining_ratio_min: float = 0.20,
     thin_page_chars: int = 50,
 ) -> dict[str, dict]:
     """Run every parse-quality check. Returns the record for document.qa."""
