@@ -23,11 +23,14 @@ floor this close to the observed value. It leaves a 1.66x margin and, unlike
 gap: this catches deletion only. Reordered marks (invariant 7's other failure
 mode) leave the count identical. See KNOWLEDGE.md.
 
-unmapped_pua_codepoints scans PUA_RANGE, the Thai tone-mark sub-range, and so
-is blind to the U+F0xx private-use characters that SymbolMT and Wingdings
-produce - 593 of them in 2568, three of which are real content (alpha, delta,
-an arrow inside chemical group names). Repairing those needs the span font,
-which Page does not carry. See LOG.md.
+unmapped_pua_codepoints scans PUA_RANGE, the Thai tone-mark sub-range, so
+symbol_pua_codepoints reports the rest of the private use area separately -
+the U+F0xx characters SymbolMT and Wingdings produce, 593 of them in 2568,
+three of which are real content (alpha, delta, an arrow inside chemical group
+names). It measures and never blocks, on purpose: repairing those needs the
+span font, which Page does not carry, so blocking would refuse a document
+nothing in this repo can fix. The number reaching document.qa is what makes the
+gap auditable instead of invisible. See LOG.md and KNOWLEDGE.md.
 
 Text arrives raw, before normalize.py — the gate has to see the damage before
 anyone repairs it. A consequence is that mapped PUA tone marks are not counted
@@ -39,6 +42,10 @@ import re
 
 from ingest.extract import Page
 from ingest.normalize import PUA_RANGE, PUA_TO_THAI
+
+# The whole Basic Multilingual Plane private use area. PUA_RANGE is the Thai
+# tone-mark slice of it; everything else in here is some other font's glyph.
+ANY_PUA = re.compile("[\ue000-\uf8ff]")
 
 THAI_COMBINING = re.compile(r"[ัิ-ฺ็-๎]")
 THAI_CONSONANT = re.compile(r"[ก-ฮ]")
@@ -82,6 +89,9 @@ def qa_gate(
     unmapped = sorted(
         {f"U+{ord(c):04X}" for c in PUA_RANGE.findall(text) if c not in PUA_TO_THAI}
     )
+    symbol_pua = sorted(
+        {f"U+{ord(c):04X}" for c in ANY_PUA.findall(text) if not PUA_RANGE.match(c)}
+    )
 
     return {
         "page_numbers_not_sequential": _check(numbers == expected, numbers),
@@ -93,6 +103,10 @@ def qa_gate(
         ),
         "thin_pages": _check(True, len(thin), thin_page_chars),
         "unmapped_pua_codepoints": _check(not unmapped, unmapped),
+        # Measured, never blocking: nothing here can repair a symbol-font glyph
+        # without the span font, so failing the document would only stop it
+        # being ingested at all. Recorded so the gap is auditable per document.
+        "symbol_pua_codepoints": _check(True, symbol_pua),
         "combining_ratio_too_low": _check(
             consonants == 0 or marks / consonants >= combining_ratio_min,
             round(marks / consonants, 4) if consonants else None,

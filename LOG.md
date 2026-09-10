@@ -45,3 +45,31 @@ byte-to-glyph tables are close enough to be convincing and wrong — U+F072 in W
 a triangle used *as* Δ, not the Greek letter, and getting that backwards writes the wrong
 character into a chemical name. Rendered each glyph out of the PDF at 8x and read it
 instead.
+
+### Bug: the PUA check was narrower than its name and hid symbol-font glyphs
+**Status:** Partly fixed — detected and recorded, not repaired
+**Date:** 2026-09-10
+**Cause:** `unmapped_pua_codepoints` scans `PUA_RANGE`, which is only the Thai
+tone-mark slice U+F700-U+F71A. Every other private-use character passed the gate
+silently, so a document could reach `chunk.content` carrying hundreds of glyphs
+that cannot be searched or rendered while `document.qa` recorded no problem.
+**Solution:** added `symbol_pua_codepoints`, which scans the whole BMP private
+use area (U+E000-U+F8FF) minus the Thai slice. It measures and never blocks.
+Measured across the corpus, which turned up something the earlier survey missed
+— 2565 carries symbol glyphs too, not just 2568:
+
+```
+2565  U+F022 U+F061 U+F072 U+F097
+2566  (none)
+2568  U+F022 U+F061 U+F072 U+F07E
+```
+
+**Tried and rejected:** widening `PUA_RANGE` itself so the existing check blocks
+on these. That would fail 2568 and 2565 outright on 593 and 225 characters
+respectively, with no code path able to repair them: the same codepoint means
+different things under different fonts (U+F061 is alpha only because the span
+is SymbolMT), so a font-blind mapping table would be wrong by construction, and
+a correct one needs span fonts that `Page` does not carry. Blocking a document
+nothing can fix converts a silent data-quality gap into a hard stop without
+improving the data. Recording the codepoints per document keeps the gap
+auditable and leaves the repair for when `extract.py` carries font information.

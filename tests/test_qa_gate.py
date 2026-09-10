@@ -105,3 +105,26 @@ def test_unmapped_pua_is_reported_by_codepoint():
     pages = make_pages([THAI_OK + unmapped] * 3)
     result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
     assert result["unmapped_pua_codepoints"]["measured"] == [f"U+{ord(unmapped):04X}"]
+
+def test_symbol_pua_is_measured_but_never_blocking():
+    symbol = chr(0xF061)   # SymbolMT alpha, the shape 2568 uses for a real character
+    pages = make_pages([THAI_OK + symbol] * 3)
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
+    assert "symbol_pua_codepoints" not in failed(result)
+    assert result["symbol_pua_codepoints"]["measured"] == ["U+F061"]
+
+def test_thai_pua_is_not_reported_as_a_symbol():
+    pua = next(iter(PUA_TO_THAI))
+    pages = make_pages([THAI_OK + pua] * 3)
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
+    assert result["symbol_pua_codepoints"]["measured"] == []
+    assert "unmapped_pua_codepoints" not in failed(result)
+
+def test_symbol_pua_does_not_hide_an_unmapped_thai_pua():
+    unmapped = next(
+        chr(c) for c in range(0xF700, 0xF71B) if chr(c) not in PUA_TO_THAI
+    )
+    pages = make_pages([THAI_OK + unmapped + chr(0xF061)] * 3)
+    result = qa_gate(pages, pdf_page_count=3, scopes=["fungicide"])
+    assert "unmapped_pua_codepoints" in failed(result)
+    assert result["symbol_pua_codepoints"]["measured"] == ["U+F061"]
