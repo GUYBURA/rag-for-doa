@@ -200,8 +200,17 @@ rerank-2.5-lite via OpenRouter) as the real `Scorer`. `SCORE_THRESHOLD` is
 calibrated against `eval/questions.yaml` (see the constant's own comment and
 `eval/run_eval.py --sweep`), not guessed.
 
+`query/prompt.py` exists and is pure — `build_prompt(question, passages)` returns a
+`Prompt` carrying the text and the `[n]` → `Passage` mapping, `parse_answer(raw, prompt)`
+turns the model's JSON reply into an `Answer`. The model is never shown a page number or
+an edition year: citations are built in Python from the `Passage` objects, so a cited
+page is always one retrieval actually returned (invariant 10). An empty `citations` list
+from the model means refusal and its answer text is discarded (`REFUSAL_TEXT`); an
+out-of-range `[n]` raises, which is the grounding failure invariant 11's "retry once,
+then refuse" exists for. Nothing here calls an LLM — that belongs to `app/main.py`.
+
 Not written yet, so the command does not exist: `db/seed.sql`, `app/main.py`,
-`query/prompt.py`, `query/guards.py`.
+`query/guards.py`.
 
 ## Conventions
 
