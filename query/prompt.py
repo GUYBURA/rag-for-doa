@@ -33,6 +33,7 @@ class Citation:
 
     number: int
     passage: Passage
+    score: float  # the rerank score, carried through for the API response
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ def build_prompt(question: str, passages: Sequence[ScoredPassage]) -> Prompt:
     # 1-based, and the number comes from position here -- never from
     # passage.rank, which reranking has already reordered away from.
     citations = [
-        Citation(number=n, passage=sp.passage)
+        Citation(number=n, passage=sp.passage, score=sp.score)
         for n, sp in enumerate(passages, start=1)
     ]
     # Built from `citations` rather than by enumerating `passages` a second
