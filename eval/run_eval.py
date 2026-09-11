@@ -35,17 +35,16 @@ from query.retrieve import CANDIDATES, make_store, retrieve
 
 QUESTIONS_PATH = Path(__file__).resolve().parent / "questions.yaml"
 
-# Table cells are joined with literal "<br>" markers by extract.py's
-# _to_markdown() -- a real newline inside a cell, not a real HTML tag. Two
-# words split across a <br> ("Phakopsora<br>pachyrhizi") aren't a contiguous
-# substring of chunk.content, so every containment check below normalizes it
-# to a space first. Without this, none of the Latin-binomial gold questions
-# below would ever register a hit, no matter how correct retrieval was.
-_BR = re.compile(r"<br\s*/?>")
-
-
 def _flatten(text: str) -> str:
-    return re.sub(r"\s+", " ", _BR.sub(" ", text))
+    """Collapse whitespace before a containment check.
+
+    extract.py used to join wrapped cell lines with a literal "<br>", which
+    made "Phakopsora<br>pachyrhizi" not a substring of the binomial anyone
+    would search for, and this function stripped the markers. It now renders
+    them as spaces, so only the whitespace collapse is left -- a cell that
+    wrapped mid-term still puts a space where the print had a line break.
+    """
+    return re.sub(r"\s+", " ", text)
 
 
 @dataclass

@@ -94,19 +94,48 @@ def _to_markdown(cells: tuple[tuple[str, ...], ...]) -> str:
 
     The first row becomes the header because the format requires one, not
     because the table necessarily has one.
+
+    Two mechanical cleanups, both driven by what PyMuPDF actually returns for
+    these handbooks. Page 56 of 2568 comes back as 11 columns of which four
+    are empty in every row, because a merged cell reports its text once and
+    leaves the rest of the span blank, and because the ruling lines include
+    narrow spacer columns that hold nothing:
+
+      - a column empty in every row is dropped, and a row empty in every
+        column with it. What they contribute is "||||||||" -- tokens the
+        model pays for and structure a reader has to see past.
+      - a newline inside a cell becomes a space, not "<br>". The breaks are
+        where the text wrapped in the printed table, not part of the data,
+        and rendering them literally splits terms that belong together:
+        "Phakopsora<br>pachyrhizi" is not a substring match for the Latin
+        binomial anyone would search or cite.
+
+    Neither cleanup drops a character of cell text or makes a judgement about
+    what a row means -- `cells` remains the unedited record, and this is a
+    rendering of it. Deciding which rows are header, in a table whose header
+    spans several physical rows, would be exactly the judgement call this
+    module does not make.
     """
     if not cells:
         return ""
 
-    def cell(text: str) -> str:
-        return text.strip().replace("|", "\\|").replace("\n", "<br>")
+    def clean(text: str) -> str:
+        return " ".join(text.replace("|", "\\|").split())
 
-    def row(values: tuple[str, ...]) -> str:
-        return "|" + "|".join(cell(v) for v in values) + "|"
+    cleaned = [[clean(value) for value in row] for row in cells]
+    width = max(len(row) for row in cleaned)
+    keep = [i for i in range(width) if any(i < len(row) and row[i] for row in cleaned)]
+    kept = [[row[i] if i < len(row) else "" for i in keep] for row in cleaned]
+    kept = [row for row in kept if any(row)]
+    if not kept:
+        return ""
 
-    header, *body = cells
+    def line(values: list[str]) -> str:
+        return "|" + "|".join(values) + "|"
+
+    header, *body = kept
     separator = "|" + "|".join("---" for _ in header) + "|"
-    return "\n".join([row(header), separator, *(row(r) for r in body)])
+    return "\n".join([line(header), separator, *(line(r) for r in body)])
 
 
 def extract_tables(pdf_path: str) -> list[Table]:

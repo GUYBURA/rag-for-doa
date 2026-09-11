@@ -33,15 +33,24 @@ RERANK_MODEL = "voyageai/rerank-2.5-lite"
 # model's 0.0001-0.06 range.
 TOP_K = 5
 
-# Calibrated against eval/questions.yaml's 28 answerable / 6 unanswerable
-# gold set via `uv run python -m eval.run_eval --sweep`: the highest value
-# that still preserves the best achievable recall@5 (27/28 -- the one miss,
-# a strawberry pest question, ranks 7th of 20 candidates regardless of
-# threshold, so no threshold recovers it). At this value it refuses the one
-# unambiguously off-domain gold question (top score 0.418). It does NOT
-# reliably refuse the harder unanswerable questions -- an absent crop, a
-# real pest asked about the wrong real crop, a fact superseded out of the
-# active edition -- whose scores (0.62-0.80) overlap the range real answers
+# Calibrated against eval/questions.yaml via `uv run python -m eval.run_eval
+# --sweep`: the value that preserves the best achievable recall@5 while
+# refusing as many unanswerable questions as any threshold that costs no
+# recall. The one recall miss, a strawberry pest question, ranks 7th of 20
+# candidates regardless of threshold, so no threshold recovers it.
+#
+# Re-verified after extract.py's table rendering changed and the whole corpus
+# was re-ingested (chunk text changed, so every score did): on the now 29
+# answerable / 5 unanswerable gold set, recall@5 = 28/29 and one refusal,
+# unchanged. The sweep's own suggestion moved to 0.3916, which sits on the
+# same plateau -- identical recall, identical refusals -- so 0.42 stays
+# rather than churning the constant for no measured gain.
+#
+# At this value it refuses the one unambiguously off-domain gold question
+# (top score 0.418 before re-ingest). It does NOT
+# reliably refuse the harder unanswerable questions -- a fabricated
+# chemical, an absent crop, a real pest asked about the wrong real crop --
+# whose scores (0.62-0.80) overlap the range real answers
 # score in; no single threshold on this scorer separates those cleanly (see
 # KNOWLEDGE.md and eval/run_eval.py's sweep() docstring). That gap is
 # invariant 11's other check ("failed grounding check -> retry once, then

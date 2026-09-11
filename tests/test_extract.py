@@ -2,7 +2,7 @@ import pathlib
 
 import pytest
 
-from ingest.extract import extract_pages, extract_tables, page_count
+from ingest.extract import _to_markdown, extract_pages, extract_tables, page_count
 from ingest.normalize import PUA_RANGE
 from ingest.qa_gate import THAI_COMBINING, THAI_CONSONANT
 
@@ -65,6 +65,52 @@ def test_table_geometry_matches_the_dosage_layout():
     assert widest.col_count == 12
     assert len(widest.cells) == widest.row_count
     assert all(len(row) == widest.col_count for row in widest.cells)
+
+
+def test_a_column_empty_in_every_row_is_dropped():
+    """Merged cells report their text once and leave the rest of the span
+    blank, and the ruling lines add narrow spacer columns that never hold
+    anything -- page 56 of 2568 is 11 columns of which four are always empty.
+    """
+    cells = (("a", "", "b"), ("c", "", "d"))
+    assert _to_markdown(cells) == "|a|b|\n|---|---|\n|c|d|"
+
+
+def test_a_column_carrying_text_in_only_one_row_is_kept():
+    """The twin of the test above. Dropping a column because it is mostly
+    empty would delete a heading that spans a merged group, or a footnote
+    marker on one row.
+    """
+    cells = (("a", "", "b"), ("c", "note", "d"))
+    assert _to_markdown(cells) == "|a||b|\n|---|---|---|\n|c|note|d|"
+
+
+def test_a_row_empty_in_every_column_is_dropped():
+    cells = (("a", "b"), ("", ""), ("c", "d"))
+    assert _to_markdown(cells) == "|a|b|\n|---|---|\n|c|d|"
+
+
+def test_a_newline_inside_a_cell_becomes_a_space_not_a_br():
+    """The break is where the printed table wrapped, not part of the data.
+    Rendered as "<br>" it splits terms that belong together, and a Latin
+    binomial that reads "Phakopsora<br>pachyrhizi" is not a substring match
+    for the name anyone would search for or cite.
+    """
+    cells = (("Phakopsora\npachyrhizi", "x"),)
+    assert _to_markdown(cells) == "|Phakopsora pachyrhizi|x|\n|---|---|"
+    assert "<br>" not in _to_markdown(cells)
+
+
+def test_a_pipe_inside_a_cell_is_escaped():
+    """Unescaped, it would end the cell early and shift every value after it
+    into the wrong column.
+    """
+    cells = (("a|b", "c"),)
+    assert _to_markdown(cells) == "|a\\|b|c|\n|---|---|"
+
+
+def test_a_table_with_nothing_in_it_renders_as_nothing():
+    assert _to_markdown((("", ""), ("", ""))) == ""
 
 
 def test_markdown_keeps_thai_marks_where_they_belong():
