@@ -32,6 +32,9 @@ dependencies = [
   "openai>=3.11.0",
   "python-dotenv>=1.2.3",
   "pyyaml>=6.0.3",
+  # query/rerank.py's scorer: raw HTTP to OpenRouter's Cohere-compatible
+  # /api/v1/rerank, which the openai SDK client has no typed method for.
+  "requests>=2.32.3",
 ]
 
 [dependency-groups]
@@ -45,4 +48,5 @@ pythonpath = ["."]
 markers = [
   "requires_source_pdfs: needs data/raw/*.pdf, which are gitignored and absent in CI",
   "requires_embeddings: needs OPENROUTER_API_KEY, which CI does not have",
-] 
+  "requires_rerank: needs OPENROUTER_API_KEY and hits the live rerank endpoint",
+]

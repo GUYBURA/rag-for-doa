@@ -22,7 +22,6 @@ from query.retrieve import (
     async_url,
     fts_query,
     hybrid_config,
-    make_store,
     retrieve,
 )
 
@@ -33,10 +32,9 @@ SOYBEAN = "ถั่วเหลือง (Soybean)"
 PASSING_QA = {"no_thai_consonants": {"passed": True, "measured": 5, "threshold": None}}
 
 
-@pytest.fixture(scope="session")
-def store(ingested_corpus):
-    """One store per session. create_sync() costs a round trip and an engine."""
-    return make_store(ingested_corpus)
+# `store` moved to conftest.py: test_rerank.py's end-to-end tests need the
+# same fixture, and a fixture defined in one test file isn't visible to
+# another.
 
 
 # --------------------------------------------------------------------------

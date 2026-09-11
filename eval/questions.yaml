@@ -1,29 +1,36 @@
-# Gold set for query/retrieve.py, run against the real local corpus (Docker,
-# 2565/2566 archived, 2568 active - see PROMPT.md). Not synthetic: every
-# expect_contains string below was read out of an actual chunk in that corpus
-# (see the sampling in KNOWLEDGE.md / session notes), not invented from memory
-# of the PDFs.
+# Gold set for query/retrieve.py + query/rerank.py, run against the real
+# local corpus (Docker, 2565/2566 archived, 2568 active - see PROMPT.md).
+# Not synthetic: every expect_contains string below was confirmed present in
+# an actual chunk of that corpus by direct query before being written here
+# (see the session notes / KNOWLEDGE.md), not invented from memory of the
+# PDFs.
 #
 # Fields:
 #   id               short, stable across edits so a regression is easy to name
 #   question         Thai, as a user would type it
 #   answerable       true = a passage should exist; false = correct behaviour
-#                     is "no relevant document" further down the pipeline.
-#                     retrieve.py has no refusal logic itself (that is
-#                     rerank.py's job) - this field is scored as "the top
-#                     result should NOT resemble a confident answer", i.e.
-#                     expect_contains is absent and expect_section is null.
+#                     is rerank() returning [] (invariant 11's refusal).
 #   expect_contains  substring that must appear in at least one of the top-k
-#                     retrieved passages, verbatim, for the question to score
-#                     as a hit. Case-sensitive, since Latin chemical/pathogen
-#                     names are exact strings in the source.
+#                     reranked passages for the question to score as a hit.
+#                     Table cells are joined with literal "<br>" markers
+#                     (see extract.py's _to_markdown()), so a two-word Latin
+#                     binomial like "Genus species" is usually split across
+#                     one in the raw text -- run_eval.py normalizes "<br>" to
+#                     a space before checking, so write the substring as it
+#                     reads, not as it's stored.
 #   expect_section   the crop heading the right table sits under, or null.
-#                     Checked against passage.section on the SAME hit that
-#                     satisfied expect_contains, not on the top rank alone -
-#                     a question can be answered by a passage that isn't first.
-#   k                cutoff for recall@k on this question. Defaults to 5 (the
-#                     size rerank.py will eventually cut candidates to) when
-#                     omitted.
+#                     Checked on the SAME passage that satisfied
+#                     expect_contains, not on the top rank alone: several
+#                     active ingredients and pathogen genera in this corpus
+#                     repeat across 6+ crop sections (measured: prochloraz,
+#                     Colletotrichum), so a contains-only check would score
+#                     "found some fungicide table" as a hit.
+#   k                cutoff for recall@k on this question. Unused for now --
+#                     run_eval.py scores at rerank.py's real TOP_K.
+
+# --- answerable: Latin-binomial facts, each confirmed unique to one section
+# across the whole active corpus (see the extraction script in session notes)
+# ---
 
 - id: q01_chilli_anthracnose_active_ingredient
   question: โรคแอนแทรคโนสในพริกใช้สารอะไรกำจัด
@@ -46,13 +53,13 @@
 - id: q04_mango_leafhopper_latin
   question: เพลี้ยจักจั่นมะม่วงมีชื่อวิทยาศาสตร์ว่าอะไร
   answerable: true
-  expect_contains: "Idioscopus"
+  expect_contains: "Idioscopus clypealis"
   expect_section: "มะม่วง (Mango)"
 
 - id: q05_grape_scab
   question: โรคสแคปในองุ่นเกิดจากเชื้อราอะไร
   answerable: true
-  expect_contains: "Sphaceloma"
+  expect_contains: "Sphaceloma ampelinum"
   expect_section: "องุ่น (Grape)"
 
 - id: q06_coffee_anthracnose_dose
@@ -64,7 +71,7 @@
 - id: q07_coffee_berry_borer_latin
   question: มอดเจาะผลกาแฟชื่อวิทยาศาสตร์อะไร
   answerable: true
-  expect_contains: "Hypothenemus"
+  expect_contains: "Hypothenemus hampei"
   expect_section: "กาแฟ (Coffee)"
 
 - id: q08_cassava_anthracnose
@@ -76,7 +83,7 @@
 - id: q09_soybean_rust
   question: โรคราสนิมในถั่วเหลืองเกิดจากเชื้อราอะไร และใช้สารอะไรป้องกัน
   answerable: true
-  expect_contains: "Phakopsora"
+  expect_contains: "Phakopsora pachyrhizi"
   expect_section: "ถั่วเหลือง (Soybean)"
 
 - id: q10_mungbean_stemfly_latin
@@ -86,33 +93,170 @@
   expect_section: "ถั่วเขียว (Mung bean)"
 
 - id: q11_within_table_row_disambiguation
-  # The twin of q10: same crop, same table, a *different* pest row
-  # (หนอนม้วนใบถั่ว vs. q10's หนอนแมลงวันเจาะต้นถั่ว). Getting expect_section
-  # right for both q10 and q11 is easy for any retriever that just returns
-  # "the mung bean table" - what this pair actually checks is that the passage
-  # containing the row for THIS pest ranks first, not merely a passage from
-  # the right table.
+  # Same crop, same table, a DIFFERENT pest row than q10 -- proves the right
+  # ROW ranks first, not merely a passage from the right table.
   question: หนอนม้วนใบถั่วเขียวใช้สารอะไรกำจัด
   answerable: true
   expect_contains: "อินดอกซาคาร์บ"
   expect_section: "ถั่วเขียว (Mung bean)"
 
-- id: q12_out_of_domain
-  # Not pesticide guidance at all. No passage in this corpus should look like
-  # a confident answer; a retriever with no notion of relevance still returns
-  # its 20 nearest vectors regardless, which is exactly the failure mode
-  # rerank.py's threshold exists to catch downstream.
+- id: q12_chives_rust
+  question: กุยช่ายเป็นโรคราสนิมเกิดจากเชื้อราชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Puccinia allii"
+  expect_section: "กุยช่าย (Chives)"
+
+- id: q13_soybean_stemfly_latin
+  question: แมลงวันเจาะลำต้นถั่วเหลืองชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Melanagromyza sojae"
+  expect_section: "ถั่วเหลือง (Soybean)"
+
+- id: q14_rice_brown_planthopper
+  question: เพลี้ยกระโดดสีน้ำตาลในนาข้าวชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Nilaparvata lugens"
+  expect_section: "ข้าว (Rice)"
+
+- id: q15_crucifer_diamondback_moth
+  question: หนอนใยผักในพืชตระกูลกะหล่ำชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Plutella xylostella"
+  expect_section: "พืชตระกูลกะหล่ำ (Cruciferous)"
+
+- id: q16_potato_late_blight
+  question: โรคใบไหม้ในมันฝรั่งเกิดจากเชื้อราชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Phytophthora infestans"
+  expect_section: "มันฝรั่ง (Potato)"
+
+- id: q17_banana_weevil
+  question: ด้วงงวงเจาะลำต้นกล้วยชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Cosmopolites sordidus"
+  expect_section: "กล้วย (Banana)"
+
+- id: q18_sweetpotato_weevil
+  question: ด้วงงวงมันเทศชื่อวิทยาศาสตร์อะไร ใช้สารอะไรกำจัด
+  answerable: true
+  expect_contains: "Cylas formicarius"
+  expect_section: "มันเทศ (Sweet potato)"
+
+- id: q19_coconut_rhinoceros_beetle
+  question: ด้วงแรดมะพร้าวชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Oryctes rhinoceros"
+  expect_section: "มะพร้าว (Coconut)"
+
+- id: q20_tomato_leafminer
+  question: หนอนชอนใบมะเขือเทศชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Phthorimaea absoluta"
+  expect_section: "มะเขือเทศ (Tomato)"
+
+- id: q21_dragonfruit_fruitfly
+  question: แมลงวันผลไม้ในแก้วมังกรชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Zeugodacus cucurbitae"
+  expect_section: "แก้วมังกร (Dragon fruit)"
+
+- id: q22_cotton_aphid
+  question: เพลี้ยอ่อนฝ้ายชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Aphis gossypii"
+  expect_section: "ฝ้าย (Cotton)"
+
+- id: q23_strawberry_spider_mite
+  question: ไรแดงในสตรอว์เบอร์รีชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Tetranychus urticae"
+  expect_section: "สตรอว์เบอร์รี (Strawberry)"
+
+- id: q24_rice_stem_borer
+  question: หนอนกอข้าวชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Scirpophaga incertulas"
+  expect_section: "ข้าว (Rice)"
+
+- id: q25_corn_sheath_blight
+  question: โรคที่เกิดจากเชื้อรา Rhizoctonia solani ในข้าวโพดใช้สารอะไรป้องกัน
+  answerable: true
+  expect_contains: "Rhizoctonia solani"
+  expect_section: "ข้าวโพด (Corn)"
+
+- id: q26_chinese_cabbage_downy_mildew
+  question: โรคราน้ำค้างในผักกาดขาวปลีเกิดจากเชื้อราชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Peronospora parasitica"
+  expect_section: "ผักกาดขาวปลี (Chinese cabbage) ผักกาดเขียวปลี (leaf mustard)"
+
+- id: q27_citrus_leafminer
+  question: หนอนชอนใบส้มชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Phyllocnistis citrella"
+  expect_section: "พืชตระกูลส้ม (Citrus)"
+
+- id: q28_durian_psyllid
+  question: เพลี้ยไก่แจ้ทุเรียนชื่อวิทยาศาสตร์อะไร
+  answerable: true
+  expect_contains: "Allocarsidara malayensis"
+  expect_section: "ทุเรียน (Durian)"
+
+# --- unanswerable: four distinct failure modes, not just one repeated ---
+
+- id: q29_out_of_domain
+  # Not pesticide guidance at all.
   question: วิธีต้มส้มตำให้อร่อยทำอย่างไร
   answerable: false
   expect_contains: null
   expect_section: null
 
-- id: q13_fabricated_active_ingredient
-  # A chemical name that does not exist in this corpus (or, as far as this
-  # project knows, in reality). Distinct failure mode from q12: this one is
-  # on-topic, so a dense-only retriever is more likely to return a plausible-
-  # looking but wrong table for it.
+- id: q30_fabricated_active_ingredient
+  # On-topic but the chemical does not exist in this corpus (or, as far as
+  # this project knows, in reality) -- a dense-only retriever is more
+  # likely to return a plausible-looking but wrong table for this than for
+  # an off-domain question.
   question: ใช้ไซโคลฟอสมิน (fictional) กำจัดโรคพืชได้อัตราเท่าไหร่
+  answerable: false
+  expect_contains: null
+  expect_section: null
+
+- id: q31_crop_absent_from_corpus
+  # Verified absent: zero chunks contain "อะโวคาโด" or "Avocado" anywhere
+  # in the active corpus, in either script.
+  question: โรคใบจุดในอะโวคาโดใช้สารอะไรป้องกัน
+  answerable: false
+  expect_contains: null
+  expect_section: null
+
+- id: q32_real_pest_wrong_crop_mango_leafhopper_in_durian
+  # Both terms are real and both are indexed (q04's mango leafhopper, and
+  # durian is its own section) -- the mismatch is that this specific
+  # pest-crop pairing has no support anywhere in the corpus. Hardest
+  # failure mode: on-topic, both entities exist, dense similarity to q04's
+  # answer is high.
+  question: เพลี้ยจักจั่นมะม่วงในทุเรียนใช้สารอะไรกำจัด
+  answerable: false
+  expect_contains: null
+  expect_section: null
+
+- id: q33_real_pest_wrong_crop_coffee_borer_in_mango
+  # The twin of q32, swapped: a real pest (q07's coffee berry borer) asked
+  # about a different real crop (mango) it has no table entry under.
+  question: มอดเจาะผลกาแฟในมะม่วงใช้สารอะไรกำจัด
+  answerable: false
+  expect_contains: null
+  expect_section: null
+
+- id: q34_superseded_soybean_stinkbug
+  # Supersession, not absence: the 2565 edition's soybean table carried a
+  # stink bug entry (Nezara viridula, misspelled "Nezera" in the source
+  # PDF) that the active 2568 edition's soybean section does not -- checked
+  # directly (zero hits for "Nezara"/"stink"/"มวนเขียว"/"Riptortus" in the
+  # active corpus's soybean section). This is the negative that actually
+  # tests the project's premise: a question the system used to be able to
+  # answer, and correctly can no longer.
+  question: มวนเขียวในถั่วเหลืองใช้สารอะไรกำจัด
   answerable: false
   expect_contains: null
   expect_section: null
