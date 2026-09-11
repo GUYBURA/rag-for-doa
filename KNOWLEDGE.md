@@ -718,3 +718,61 @@ looked reasonable as a lone number and obviously wrong next to '1/28 kept.'
 The fix wasn't a bug fix, it was replacing a lexicographic objective with a
 constrained one: preserve the ceiling on what's achievable, then optimize
 what's left."
+
+### Concept: Choosing a generation model is a measurement, and abstention is one of the axes
+
+**Definition:** Which LLM answers the question is a decision with several
+independent quality axes -- grounding, output format compliance, output
+language, and willingness to decline -- and a model can improve on some while
+regressing on others. Ranking candidates on one axis, or on price, hides the
+regression.
+
+**Why it matters here:** `google/gemini-2.5-flash-lite` was picked first
+because it was cheapest. Run end to end over all 34 gold questions it answered
+four Thai questions in English, flatly ignoring an instruction that says to
+answer in the question's language. Moving up to `google/gemini-2.5-flash`
+fixed the language on all four, and looked like a straight upgrade until the
+negatives were counted: refusals on the unanswerable set fell from 5 of 6 to 3
+of 6, and one answered question's citation no longer contained the expected
+fact. A more capable model was more willing to produce an answer, which in a
+regulatory-guidance system is a regression, because ARCHITECTURE.md weights
+abstention on purpose. `z-ai/glm-5.3-flash` was the only candidate that gave
+up nothing on any axis (27/28 answered, 27/27 grounded, 28/28 in Thai, 5/6
+refused) and it costs a fraction of flash. The measurement cost three runs of
+34 questions and would have been impossible to reason out from model cards.
+
+The `Chat` protocol is what made trying three models a one-line change each
+time, the same way `Scorer` did for the reranker swap.
+
+**Interview answer:** "I don't pick a generation model from a leaderboard or
+from price. I ran all three candidates over the same gold set through the real
+pipeline and scored four things separately: did it answer, was the answer
+grounded in the cited chunk, was it in the right language, and did it decline
+when it should. The mid-tier model won on language and lost on abstention --
+which for regulatory guidance is the wrong trade, since an over-eager answer
+is worse than no answer. That trade-off is invisible unless you count refusals
+as a quality metric rather than as failures."
+
+### Concept: A model will not obey a formatting rule that the API can enforce instead
+
+**Definition:** Instructions in a prompt are requests. Where the provider
+offers a structural constraint -- JSON mode, a schema, a grammar -- that
+constraint is enforcement, and the prompt rule is at best a hint.
+
+**Why it matters here:** `prompt.py`'s `INSTRUCTIONS` rule 5 says to return
+exactly one JSON object and explicitly says no markdown code fence. Every
+model tried -- flash-lite, flash, glm-5.3-flash -- wrapped its reply in a
+` ```json ` fence anyway, and every reply failed `json.loads()`. Adding
+`response_format={"type": "json_object"}` to the request fixed it for all of
+them with no prompt change at all. The rule stays in the prompt as
+documentation of intent, but `response_format` is what actually makes parsing
+work, which is why `query/answer.py` comments it as load-bearing rather than
+precautionary. The retry-once path exists for what the constraint cannot
+cover: a syntactically valid reply citing an excerpt that was never sent.
+
+**Interview answer:** "The prompt told the model not to wrap its JSON in a
+code fence and every model I tried did it anyway. Prompt rules aren't
+enforcement. Once I turned on the provider's JSON mode the problem vanished
+across all three models. I kept the prompt rule for intent and the parse-error
+retry for the failures a schema can't catch -- a well-formed reply that cites
+a document I never sent it."

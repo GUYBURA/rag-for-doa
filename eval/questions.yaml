@@ -248,15 +248,22 @@
   expect_contains: null
   expect_section: null
 
-- id: q34_superseded_soybean_stinkbug
-  # Supersession, not absence: the 2565 edition's soybean table carried a
-  # stink bug entry (Nezara viridula, misspelled "Nezera" in the source
-  # PDF) that the active 2568 edition's soybean section does not -- checked
-  # directly (zero hits for "Nezara"/"stink"/"มวนเขียว"/"Riptortus" in the
-  # active corpus's soybean section). This is the negative that actually
-  # tests the project's premise: a question the system used to be able to
-  # answer, and correctly can no longer.
+- id: q34_soybean_stinkbug
+  # Was labelled unanswerable, on the belief that the 2565 edition's stink bug
+  # entry (Nezara viridula) had been superseded out of the active 2568
+  # edition. That was wrong, and the check that produced it was wrong in a
+  # specific way worth recording: it searched the active corpus's *soybean
+  # section*, and 434 of 583 chunks have section = NULL because chunk.py's
+  # heading detection misses them. "Nezara viridula" and "มวนเขียว" are in
+  # five active 2568 chunks (pages 96, 102, 110, 112, 120), all with a null
+  # section. A section-scoped search for content in an unsectioned chunk finds
+  # nothing whether or not the content is there.
+  #
+  # Relabelled answerable with expect_section null to match those chunks. The
+  # gold set therefore has no supersession negative any more -- building a
+  # real one needs section detection fixed first, since it is the same blind
+  # spot that produced this mistake.
   question: มวนเขียวในถั่วเหลืองใช้สารอะไรกำจัด
-  answerable: false
-  expect_contains: null
+  answerable: true
+  expect_contains: Nezara viridula
   expect_section: null

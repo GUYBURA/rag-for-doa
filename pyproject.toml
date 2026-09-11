@@ -49,4 +49,5 @@ markers = [
   "requires_source_pdfs: needs data/raw/*.pdf, which are gitignored and absent in CI",
   "requires_embeddings: needs OPENROUTER_API_KEY, which CI does not have",
   "requires_rerank: needs OPENROUTER_API_KEY and hits the live rerank endpoint",
+  "requires_llm: needs OPENROUTER_API_KEY and hits the live chat endpoint",
 ]

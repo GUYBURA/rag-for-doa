@@ -209,8 +209,20 @@ from the model means refusal and its answer text is discarded (`REFUSAL_TEXT`); 
 out-of-range `[n]` raises, which is the grounding failure invariant 11's "retry once,
 then refuse" exists for. Nothing here calls an LLM — that belongs to `app/main.py`.
 
-Not written yet, so the command does not exist: `db/seed.sql`, `app/main.py`,
-`query/guards.py`.
+`query/answer.py` orchestrates the whole query path — `answer(question, store, conn)`
+runs retrieve → rerank → build_prompt → model → parse_answer and owns the refusal and
+retry policy: nothing above the rerank threshold refuses without calling the model at
+all, an unparseable or ungrounded reply is retried exactly once and then refuses, and a
+reply with no citations is a correct refusal that is never retried. The model sits behind
+a `Chat` protocol, like `Scorer` in `rerank.py`. `ANSWER_MODEL` was chosen by running the
+full gold set through three candidates — see the constant's comment for the table.
+
+`app/main.py` runs with `uv run uvicorn app.main:app --reload`: `POST /ask` and
+`GET /health`. Refusal is a `200` with an empty `citations` list, never a `404`. **Do not
+deploy it** — there is no auth, no rate limit and no input guard until `query/guards.py`
+exists.
+
+Not written yet, so the command does not exist: `db/seed.sql`, `query/guards.py`.
 
 ## Conventions
 

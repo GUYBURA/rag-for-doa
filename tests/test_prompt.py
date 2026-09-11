@@ -118,6 +118,14 @@ def test_citation_numbers_are_positional_not_retrieval_rank():
     assert [c.number for c in prompt.citations] == [1,2]
 
 
+def test_the_rerank_score_travels_with_the_citation():
+    """The API exposes it per citation, and build_prompt() is the last place
+    the score and the Passage are both in scope.
+    """
+    prompt = build_prompt("q", [_scored(1, score=0.71)])
+    assert prompt.citations[0].score == 0.71
+
+
 def test_each_citation_keeps_its_own_passage():
     """Number -> Passage is the mapping the whole citation design rests on.
     Zipping it up wrong points an answer at the wrong page (invariant 10).
