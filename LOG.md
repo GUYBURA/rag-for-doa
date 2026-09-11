@@ -116,3 +116,50 @@ section match. One observed section value is also plainly wrong
 (`"รูปร่างของแมลง (metamorphosis) ส่งผลให้แมลงมีการลอก"`, 6 chunks), so
 detection is not merely incomplete. Changing the chunking strategy is on
 CLAUDE.md's stop-and-ask list, so it stays recorded rather than fixed here.
+
+### Bug: Table markdown was mostly empty cells, and split terms across "<br>"
+
+**Status:** Fixed
+**Date:** 2026-09-11
+**Cause:** `extract.py`'s `_to_markdown()` rendered PyMuPDF's cell grid
+verbatim. Two artefacts of that grid reached `chunk.content` and therefore the
+prompt the model reads:
+
+A merged cell reports its text once and leaves the rest of its span blank, and
+the ruling lines include narrow spacer columns that never hold anything. Page
+56 of 2568 comes back as 11 columns of which four are empty in every row, so
+rows rendered as `|ศัตรูพืช||สารป้องกันกำจัดศัตรูพืช||||||||วิธีการใช้|`.
+
+Newlines inside a cell became a literal `<br>`. Those breaks are where the
+printed table wrapped, not data, and rendering them split terms:
+`Phakopsora<br>pachyrhizi` is not a substring of the binomial anyone searches
+for or cites. `eval/run_eval.py` had already grown a `_BR` regex to undo this
+before every containment check -- a workaround downstream of the real problem.
+
+**Solution:** Drop any column empty in every row, and any row empty in every
+column, and join wrapped cell lines with a space. Both are mechanical: no cell
+text is discarded and `Table.cells` stays the unedited record, so this is a
+rendering change, not an extraction change. `_BR` removed from run_eval.py as
+dead code.
+
+Chunk text changed, so the whole corpus was re-ingested (`docker compose down
+-v`, then all three editions in edition order). Chunk counts fell -- 2565
+423 -> 383, 2566 531 -> 486, 2568 583 -> 519 -- because shorter table markdown
+splits fewer times. `assert_no_stale_chunks` returns 0 rows and no chunk
+carries `<br>`.
+
+Every score changed with the text, so `SCORE_THRESHOLD` was re-swept:
+recall@5 = 28/29 and one refusal, identical to before. The sweep's suggestion
+moved to 0.3916, on the same plateau as 0.42 (same recall, same refusals), so
+the constant stayed.
+
+**Tried and rejected:** merging the multi-row header into one row, which is
+what would actually make these tables read well -- the real header for page 56
+spans two physical rows, so the rendered header is still half empty. A
+complementary-columns rule (merge a leading row when its non-empty columns
+don't overlap the header's) is mechanical enough to implement, but it is a
+judgement about which rows *mean* header, and `extract.py` states in its own
+docstring that it makes no judgement calls: a first data row that happened to
+be complementary would be silently absorbed into the header. Left undone
+deliberately, and the discarded option recorded here because the layout
+complaint that prompted this fix is only partly addressed by it.
