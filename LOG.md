@@ -73,3 +73,46 @@ a correct one needs span fonts that `Page` does not carry. Blocking a document
 nothing can fix converts a silent data-quality gap into a hard stop without
 improving the data. Recording the codepoints per document keeps the gap
 auditable and leaves the repair for when `extract.py` carries font information.
+
+### Bug: A gold "supersession" negative was mislabelled, because the check that built it was section-scoped
+
+**Status:** Fixed
+**Date:** 2026-09-11
+**Cause:** `eval/questions.yaml`'s `q34_superseded_soybean_stinkbug` claimed
+that the 2565 edition's stink bug entry (`Nezara viridula`) had been
+superseded out of the active 2568 edition, and was labelled `answerable:
+false` on that basis. It had not been. The content is in five active 2568
+chunks (pages 96, 102, 110, 112, 120).
+
+The verification that produced the wrong label searched the active corpus's
+*soybean section*. 434 of 583 chunks have `section = NULL` -- `chunk.py`'s
+heading detection identifies a section for only 26% of them -- and all five
+chunks containing this fact are among them. A section-scoped search for
+content in an unsectioned chunk returns nothing whether or not the content is
+there, so the query could not have found it even in principle.
+
+Surfaced by running all 34 questions through `query/answer.py`: the model
+"failed" to refuse q34 and cited three pages. Reading the answer showed it was
+correct and grounded, which made the gold label the suspect rather than the
+model. Confirmed with a direct `content ilike '%Nezara%'` against `chunk`,
+with no section predicate.
+
+**Solution:** Relabelled q34 as answerable with `expect_contains: Nezara
+viridula` and `expect_section: null`, and recorded why in the question's own
+comment. The gold set now has no supersession negative at all, which is the
+honest state: building a real one requires trusting a section-scoped query,
+and that is exactly the blind spot that produced this mistake.
+
+**Tried and rejected:** deleting the question outright. The comment explaining
+how the label went wrong is worth more than the slot, and a future
+supersession negative belongs in the same place.
+
+**Left open deliberately:** `chunk.py`'s section detection. 74% null is not a
+crash and nothing depends on section being present, but two things degrade
+quietly because of it: the section label that `prompt.py` feeds the model as
+crop evidence is absent for most chunks (it is the only signal that a mango
+table is not a durian table), and `eval/run_eval.py`'s `_is_hit()` requires a
+section match. One observed section value is also plainly wrong
+(`"รูปร่างของแมลง (metamorphosis) ส่งผลให้แมลงมีการลอก"`, 6 chunks), so
+detection is not merely incomplete. Changing the chunking strategy is on
+CLAUDE.md's stop-and-ask list, so it stays recorded rather than fixed here.

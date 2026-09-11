@@ -24,12 +24,25 @@ from query.prompt import REFUSAL_TEXT, Answer, build_prompt, parse_answer
 from query.rerank import Scorer, openrouter_rerank_scorer, rerank
 from query.retrieve import CANDIDATES, retrieve
 
-# Cheapest of the Gemini family, and measurably the weakest at obeying long
-# instructions -- probed against a real build_prompt() prompt, it wrapped its
-# reply in a ```json fence despite the prompt forbidding exactly that. It is
-# usable only because response_format below removes that freedom. Swapping up
-# to google/gemini-2.5-flash is a one-line change if the eval run justifies it.
-ANSWER_MODEL = "google/gemini-2.5-flash-lite"
+# Chosen by measurement, not price. All 34 questions in eval/questions.yaml
+# were run end to end through three candidates, same prompt, same passages:
+#
+#                       answered  grounded  answered in Thai  refused
+#   gemini-2.5-flash-lite   27/28    27/27         23/28        5/6
+#   gemini-2.5-flash        28/28    27/28         27/28        3/6
+#   glm-5.3-flash           27/28    27/27         28/28        5/6
+#
+# flash-lite answered four Thai questions in English, ignoring rule 3 of
+# INSTRUCTIONS outright. flash fixed the language but became noticeably more
+# willing to answer, including questions it should have declined -- and
+# ARCHITECTURE.md weights abstention deliberately, so that is a regression,
+# not a wash. glm-5.3-flash gave up nothing on any axis. Its answers are
+# longer (231 chars mean against 117), which is the only cost found.
+#
+# Every model tried wraps its JSON in a ```json fence despite rule 5
+# forbidding it, which is why response_format below is load-bearing rather
+# than belt and braces.
+ANSWER_MODEL = "z-ai/glm-5.3-flash"
 
 # One attempt, then exactly one retry (invariant 11: "failed grounding check ->
 # retry once, then refuse"). Not a tenacity policy: this is not a transient
