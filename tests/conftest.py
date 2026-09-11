@@ -119,3 +119,14 @@ def corpus_conn(ingested_corpus):
     with psycopg.connect(ingested_corpus) as conn:
         yield conn
         conn.rollback()
+
+
+@pytest.fixture(scope="session")
+def store(ingested_corpus):
+    """One PGVectorStore per session -- create_sync() costs a round trip and
+    an engine. Shared by test_retrieve.py and test_rerank.py's end-to-end
+    tests, which both need to search the same ingested corpus.
+    """
+    from query.retrieve import make_store
+
+    return make_store(ingested_corpus)

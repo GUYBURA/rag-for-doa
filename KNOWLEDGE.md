@@ -590,3 +590,34 @@ so I don't have to normalize two incompatible scales into one. What it
 doesn't solve is absolute relevance — a fused score is still only meaningful
 relative to the other candidates in that one search, which is why the refusal
 threshold has to come from a reranker, not from retrieval's own output."
+
+### Concept: A tie-break test can pass for a reason that isn't the tie-break
+**Definition:** `rerank()` sorts kept passages by `(-score, passage.rank)` so
+equal scores fall back to retrieval rank. The first version of
+`test_ties_break_by_retrieval_rank_stably` built its input as
+`[_passage(1), _passage(2)]` (rank 1 already first in the list) and asserted
+the output was `[1, 2]`. Mutating the implementation to `sort(key=lambda sp:
+-sp.score)` — dropping the tie-break entirely — left all 9 tests green,
+including this one.
+**Why it matters here:** Python's `list.sort()` is stable: when the primary
+key ties, elements keep their *input* relative order. The test's input
+already happened to be in rank order, so a stable sort with no tie-break key
+at all reproduces `[1, 2]` by coincidence — the same output the explicit
+`sp.passage.rank` key was supposed to produce on purpose. The test could not
+tell "sorted correctly by rank" from "sorted by score only, got lucky because
+the input was already in the right order" — exactly the kind of green result
+this project's own house rule warns about ("อย่าเชื่อคำอธิบาย ให้รันพิสูจน์" /
+don't trust the explanation, run the proof). Fixed by reordering the input to
+`[_passage(2), _passage(1)]`: now a stable sort with no tie-break would
+reproduce `[2, 1]`, which fails the `== [1, 2]` assertion, so the test only
+passes when the tie-break key is actually doing the ordering. Confirmed by
+mutation both ways — before the input reorder, removing the tie-break key
+left 9/9 green; after, the same mutation turned exactly this one test red and
+nothing else.
+**Interview answer:** "A test that happens to match a language's default
+behavior can pass whether or not your code implements the rule it claims to
+test. Before trusting a tie-break or ordering test, I check whether the
+input's natural order already matches the expected output — if it does, I
+deliberately invert it, because a stable sort will silently do the right
+thing for the wrong reason otherwise. I only trust the test after mutating
+the implementation and watching it go red."
