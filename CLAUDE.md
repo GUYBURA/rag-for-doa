@@ -42,6 +42,10 @@ query/
   retrieve.py      # hybrid dense + sparse, via PGVectorStore
   rerank.py        # top-5 + score threshold
   prompt.py        # prompt assembly. Citations are constructed here.
+  answer.py        # orchestration: retrieve -> rerank -> prompt -> LLM ->
+                   # parse, plus the refusal and retry policy. Spans three
+                   # modules, so it belongs to none of them -- and not to
+                   # app/main.py either.
 app/
   main.py          # FastAPI / Cloud Run service. HTTP only — no business logic.
 eval/
@@ -179,9 +183,20 @@ uv sync
 docker compose up -d                  # pgvector/pg17; applies 001_init.sql on first boot
 docker compose down -v                # reset: drops the volume, schema reapplies on next up
 pytest
-pytest -m "not requires_source_pdfs"  # what CI runs; source PDFs are gitignored
+pytest -m "not requires_source_pdfs"  # full local suite: live API calls included
 python tests/fixtures/make_fixture.py # rebuild the extract fixture from the source PDFs
+uvicorn app.main:app --reload         # local only -- no auth until guards.py exists
 ```
+
+What CI runs is narrower, and the filter lives in `.github/workflows/test.yml`:
+
+```
+pytest -m "not requires_source_pdfs and not requires_embeddings and not requires_rerank and not requires_llm"
+```
+
+**Adding a marker to `pyproject.toml` means adding it to that filter in the same commit.**
+Splitting the two has already broken CI once: the marker existed, CI did not exclude it, and
+four live-API tests ran in an environment with no key.
 
 `ingest.run` has no CLI. `ingest(conn, pdf_path, meta)` takes a `DocumentMeta` the caller
 constructs; the admin UI will build one from a form, and until then a script or test does.
@@ -190,9 +205,13 @@ constructs; the admin UI will build one from a form, and until then a script or 
 inside `ingest()` on the passing path — there is no standalone command for it yet, and no
 retroactive/admin re-promotion flow.
 
-`eval/run_eval.py` exists and is run by hand (`uv run python -m eval.run_eval`):
-it needs a database with the real corpus ingested, which CI does not have, so
-it is not part of the test suite.
+`eval/run_eval.py` exists and is run by hand (`uv run python -m eval.run_eval`,
+or `--sweep` to re-derive the threshold): it needs a database with the real
+corpus ingested, which CI does not have, so it is not part of the test suite.
+The gold set is 29 answerable / 5 unanswerable. It has no supersession or
+edition-correctness questions — the one supersession negative turned out to be
+mislabelled, because the check that built it was section-scoped and most chunks
+have no section (LOG.md). Do not add one back until section detection is fixed.
 
 `query/rerank.py` exists: `rerank(question, passages, scorer=..., threshold=,
 top_k=)` filters/sorts/cuts, with `openrouter_rerank_scorer()` (VoyageAI's
@@ -207,7 +226,7 @@ an edition year: citations are built in Python from the `Passage` objects, so a 
 page is always one retrieval actually returned (invariant 10). An empty `citations` list
 from the model means refusal and its answer text is discarded (`REFUSAL_TEXT`); an
 out-of-range `[n]` raises, which is the grounding failure invariant 11's "retry once,
-then refuse" exists for. Nothing here calls an LLM — that belongs to `app/main.py`.
+then refuse" exists for. Nothing here calls an LLM — that belongs to `query/answer.py`.
 
 `query/answer.py` orchestrates the whole query path — `answer(question, store, conn)`
 runs retrieve → rerank → build_prompt → model → parse_answer and owns the refusal and
@@ -231,6 +250,12 @@ Not written yet, so the command does not exist: `db/seed.sql`, `query/guards.py`
 - Schema changes are new numbered files in `db/migrations/`. Never edit an applied one.
 - Anything touching supersession or archiving needs a test asserting
   `assert_no_stale_chunks` is empty — not just that a status column changed.
+- `Table.cells` is the record; `Table.markdown` is a rendering of it. `_to_markdown()` may
+  prune columns empty in every row and join wrapped cell lines with a space, because
+  neither discards cell text. It may not decide which rows *mean* header — `extract.py`
+  makes no judgement calls, and a first data row wrongly absorbed into a header is
+  invisible. Changing this rendering changes `chunk.content` and therefore
+  `content_sha256`, so it means re-ingesting the corpus, not an in-place edit.
 - `document.embedding_model` is pinned per document. Changing models means re-embedding the
   whole active set, not an in-place swap. Flag it rather than doing it.
 - Thai test fixtures must include combining marks and at least one PUA case. ASCII fixtures
