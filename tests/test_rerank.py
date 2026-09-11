@@ -271,6 +271,12 @@ def test_a_429_is_retried_until_it_succeeds(monkeypatch):
     # tenacity's backoff really sleeps between attempts; skip the wait so
     # the test doesn't take several real seconds.
     monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    # requests.post is faked below and never actually sends this, but
+    # _post_rerank() builds the Authorization header unconditionally before
+    # calling it -- os.environ["OPENROUTER_API_KEY"] still has to resolve to
+    # something, or this fails with KeyError in any environment (CI
+    # included) that has no real key set, before the fake ever runs.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     calls = []
 
@@ -289,6 +295,8 @@ def test_a_429_is_retried_until_it_succeeds(monkeypatch):
 
 
 def test_a_non_429_error_is_not_retried(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")  # see the test above
+
     calls = []
 
     def fake_post(url, **kwargs):
