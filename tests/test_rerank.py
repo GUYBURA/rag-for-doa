@@ -3,10 +3,13 @@ test here supplies its own fake Scorer, so what's under test is purely
 threshold / sort / cut, never the real API.
 """
 
+import time
 import uuid
 
 import pytest
+import requests
 
+import query.rerank as rerank_module
 from query.rerank import (
     _parse_rerank_response,
     openrouter_rerank_scorer,
@@ -244,6 +247,63 @@ def test_a_score_below_zero_raises():
 
 
 # ---------------------------------------------------------------------------
+# 429 retry: no network. requests.post is faked entirely, so this proves the
+# retry loop itself, not OpenRouter's actual rate limit -- found for real
+# running eval/run_eval.py's 34 questions back to back (a single manual
+# probe never triggers it, only a burst of calls does; see KNOWLEDGE.md).
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code != 200:
+            raise requests.exceptions.HTTPError(response=self)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def test_a_429_is_retried_until_it_succeeds(monkeypatch):
+    # tenacity's backoff really sleeps between attempts; skip the wait so
+    # the test doesn't take several real seconds.
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            return _FakeResponse(429)
+        return _FakeResponse(200, {"results": [_result(0, 0.5)]})
+
+    monkeypatch.setattr(rerank_module.requests, "post", fake_post)
+
+    scores = openrouter_rerank_scorer("q", [_passage(1)])
+
+    assert scores == [0.5]
+    assert len(calls) == 3
+
+
+def test_a_non_429_error_is_not_retried(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(1)
+        return _FakeResponse(400)
+
+    monkeypatch.setattr(rerank_module.requests, "post", fake_post)
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        openrouter_rerank_scorer("q", [_passage(1)])
+
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # openrouter_rerank_scorer(): live, real HTTP, real model. No corpus, no
 # retrieve() -- these hand-build a couple of Passage values directly, the
 # same way _passage() does above but with real Thai content this time,
@@ -299,17 +359,13 @@ def test_retrieve_then_rerank_keeps_at_most_five_from_the_expected_section(
 
 @pytest.mark.requires_rerank
 @pytest.mark.requires_embeddings
-@pytest.mark.xfail(
-    reason=(
-        "SCORE_THRESHOLD is still the 0.0 placeholder, and every real score "
-        "is already >= 0.0 by construction (_parse_rerank_response enforces "
-        "it), so nothing is ever filtered out yet. This is invariant 11's "
-        "actual enforcement point -- remove this marker once the threshold "
-        "is calibrated against eval/questions.yaml."
-    ),
-    strict=True,
-)
 def test_an_out_of_domain_question_is_refused_after_rerank(store, corpus_conn):
+    # Same question as eval/questions.yaml's q29_out_of_domain, whose
+    # measured top score (0.418) is what calibrated SCORE_THRESHOLD (0.42)
+    # sits just above -- see query/rerank.py's comment on that constant.
+    # This is invariant 11's actual enforcement point: the first case
+    # anywhere in the system where a question gets refused instead of
+    # answered.
     question = "วิธีต้มส้มตำให้อร่อยทำอย่างไร"
     passages = retrieve(store, corpus_conn, question, k=10)
 

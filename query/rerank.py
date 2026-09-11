@@ -14,13 +14,40 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from query.retrieve import Passage
 
 RERANK_URL = "https://openrouter.ai/api/v1/rerank"
-RERANK_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+RERANK_MODEL = "voyageai/rerank-2.5-lite"
+# Not nvidia/llama-nemotron-rerank-vl-1b-v2:free (used during initial design
+# and probing -- see KNOWLEDGE.md): every ":free"-suffixed model on
+# OpenRouter shares one 50-requests-per-day cap across the whole account
+# (raised to 1000/day only above $10 lifetime purchased, not just a
+# balance), which a single eval/run_eval.py pass across a few dozen
+# questions exhausts on its own. This model is billed instead --
+# effectively free in practice (~$0.000004/call on real Thai chunks) but
+# drawn from ordinary credit, not the capped free-model pool, and its scores
+# also land on a far more legible 0-1 scale (observed: 0.75 / 0.61 / 0.31 for
+# a clearly-relevant/somewhat-relevant/irrelevant triple) than the earlier
+# model's 0.0001-0.06 range.
 TOP_K = 5
-SCORE_THRESHOLD = 0.0  # placeholder -- calibrated later against eval/questions.yaml
+
+# Calibrated against eval/questions.yaml's 28 answerable / 6 unanswerable
+# gold set via `uv run python -m eval.run_eval --sweep`: the highest value
+# that still preserves the best achievable recall@5 (27/28 -- the one miss,
+# a strawberry pest question, ranks 7th of 20 candidates regardless of
+# threshold, so no threshold recovers it). At this value it refuses the one
+# unambiguously off-domain gold question (top score 0.418). It does NOT
+# reliably refuse the harder unanswerable questions -- an absent crop, a
+# real pest asked about the wrong real crop, a fact superseded out of the
+# active edition -- whose scores (0.62-0.80) overlap the range real answers
+# score in; no single threshold on this scorer separates those cleanly (see
+# KNOWLEDGE.md and eval/run_eval.py's sweep() docstring). That gap is
+# invariant 11's other check ("failed grounding check -> retry once, then
+# refuse"), not yet built (prompt.py/guards.py) -- this threshold was never
+# meant to catch those alone.
+SCORE_THRESHOLD = 0.42
 
 # == retrieve.CANDIDATES. Probed against 20 real chunks from the local
 # corpus: no error, no truncation, all 20 indices returned -- see
@@ -112,6 +139,46 @@ def _parse_rerank_response(
     return final_scores
 
 
+def _is_rate_limited(exc: BaseException) -> bool:
+    """True only for a 429 from OpenRouter. Any other HTTP error (a bad
+    request, an auth failure) should fail immediately -- retrying those
+    just delays a diagnosis that retrying can't fix.
+    """
+    return (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and exc.response.status_code == 429
+    )
+
+
+@retry(
+    retry=retry_if_exception(_is_rate_limited),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(6),
+    reraise=True,
+)
+def _post_rerank(payload: dict[str, Any]) -> dict[str, Any]:
+    """One HTTP call, retried with exponential backoff on 429 only.
+
+    Found for real: a 34-question eval run (eval/run_eval.py, one rerank
+    call per question) hit 429 on OpenRouter's free tier partway through --
+    a single manual probe never triggers this, only a burst of calls does.
+    OpenRouter did not expose a Retry-After header on the 429 response, so
+    this backs off blind rather than honouring one.
+    """
+    response = requests.post(
+        RERANK_URL,
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=90,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def openrouter_rerank_scorer(question: str, passages: Sequence[Passage]) -> list[float]:
     """The real Scorer. One HTTP call per MAX_DOCUMENTS-sized batch -- never
     more than one batch in practice at CANDIDATES=20 (probed with 20 real
@@ -130,19 +197,10 @@ def openrouter_rerank_scorer(question: str, passages: Sequence[Passage]) -> list
     scores: list[float] = []
     for start in range(0, len(passages), MAX_DOCUMENTS):
         batch = passages[start : start + MAX_DOCUMENTS]
-        response = requests.post(
-            RERANK_URL,
-            headers={
-                "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": RERANK_MODEL,
-                "query": question,
-                "documents": [p.content for p in batch],
-            },
-            timeout=90,
-        )
-        response.raise_for_status()
-        scores.extend(_parse_rerank_response(batch, response.json()))
+        payload = {
+            "model": RERANK_MODEL,
+            "query": question,
+            "documents": [p.content for p in batch],
+        }
+        scores.extend(_parse_rerank_response(batch, _post_rerank(payload)))
     return scores

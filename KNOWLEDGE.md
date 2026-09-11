@@ -621,3 +621,100 @@ input's natural order already matches the expected output — if it does, I
 deliberately invert it, because a stable sort will silently do the right
 thing for the wrong reason otherwise. I only trust the test after mutating
 the implementation and watching it go red."
+
+### Concept: A `:free`-suffixed OpenRouter model shares one account-wide daily cap
+**Definition:** Every model on OpenRouter whose id ends in `:free` draws from
+one shared bucket: 50 requests/day per account by default, regardless of
+which `:free` model is called or how many different ones are mixed. The cap
+only rises to 1000/day once the account has purchased $10 of credit
+*lifetime* — an account's current balance or per-key spending limit is a
+separate number and does not indicate whether that threshold was crossed.
+**Why it matters here:** `nvidia/llama-nemotron-rerank-vl-1b-v2:free` was
+the reranker chosen and probed early in this session (verified against real
+Thai chunks, correct ranking, `KNOWLEDGE.md`'s earlier entries). It worked
+in every individual probe and in `pytest -m requires_rerank`'s handful of
+live tests. It broke the moment `eval/run_eval.py` ran across a 34-question
+gold set in one process: `429 Too Many Requests`, body
+`"Rate limit exceeded: free-models-per-day"`, `X-RateLimit-Remaining: 0`,
+reset at a fixed UTC timestamp roughly 24h out. Tenacity retry with
+exponential backoff (added first, reasonably) could not fix this — it is
+not a transient burst, it is a hard daily counter that had already reached
+zero, so every retry attempt failed identically, however long the backoff.
+The single manual probes done earlier in the same session had already been
+spending down the same 50-request budget without triggering it, so nothing
+about individual testing gave any warning this would happen at eval scale.
+Switched to `voyageai/rerank-2.5-lite` (no `:free` suffix, billed at
+~$0.000004/call against ordinary credit) — same endpoint, same Cohere-style
+request/response shape, works after a one-line model swap because `Scorer`
+was already a protocol. Bonus, not the reason for switching: its scores sit
+on a legible 0-1 range (0.75/0.61/0.31 for a clear relevant/partial/
+irrelevant triple) instead of the earlier model's 0.0001-0.06 range, which
+makes a calibrated threshold easier to sanity-check by eye later.
+**Interview answer:** "A free-tier quota can be shared across every model
+with that tag on an account, not scoped to the one model you're calling --
+and it can be a hard daily counter, not a burst limit, so retry/backoff
+can't recover from it once it's at zero. I found this by running the real
+gold-set-scale eval, not by reading the model's own listing, and the fix
+was a one-line model swap specifically because the scoring backend was
+already behind a protocol, not hardcoded to one HTTP shape."
+
+### Concept: A near-miss surfaces the recall@k boundary, not a bug
+**Definition:** `q23_strawberry_spider_mite` asks for the scientific name of
+a mite pest on strawberry. The correct chunk (containing "Tetranychus
+urticae" under the strawberry section) is genuinely retrieved and reranked
+into the candidate pool -- it ranks 7th of 20 by score (0.373), immediately
+behind several *other* crops' mite-pest chunks (papaya 0.428, cassava 0.422,
+grape 0.416) that score higher for the same query. At the configured
+TOP_K=5 it is one position outside the cut.
+**Why it matters here:** This is not a retrieval failure (the chunk is in
+the top 20), not a rerank() bug (the sort/cut logic is mutation-tested and
+correct), and not a data problem (the fact is present and correctly
+attributed). It is a real, measured limit of this reranker on a generic
+query like "ไรแดง...ชื่อวิทยาศาสตร์อะไร" (mite ... scientific name), where
+several crops' mite entries look similarly relevant to the model and the
+crop name alone isn't enough of a signal to separate them by a full rank
+band. Recorded rather than "fixed": recall@5 on the 28-question positive
+set is 0.96 with this one miss, which is the honest number, not one
+massaged to 1.00 by discarding an inconvenient question.
+**Interview answer:** "Not every miss in an eval is a bug to patch --
+sometimes it's the system correctly reporting the edge of what a given
+retrieval-plus-rerank configuration can do. I check where a missed answer
+actually sits in the full ranked list before deciding whether it's a defect
+or a measured limitation, and I report the real recall number either way
+rather than curating the gold set down to only the questions that pass."
+
+### Concept: A threshold-selection objective needs its own sanity check
+**Definition:** `eval/run_eval.py --sweep`'s first version picked a threshold
+by `max(rows, key=lambda row: (negatives_refused, positives_kept))` --
+maximize refusals first, break ties by recall. On the calibrated gold set
+(28 answerable, 6 unanswerable) it suggested `0.80`. Read as a number in
+isolation that looked plausible. Read against the table it came from: at
+`0.80`, positives kept was 1/28.
+**Why it matters here:** The objective function was internally consistent
+and did exactly what it was told -- there was no bug in the max() call, the
+sort, or the sweep loop. The mistake was one level up: "prefer refusing when
+they conflict" (ARCHITECTURE.md's stated policy) was translated literally
+into "maximize refusals unconditionally, resolve everything else by
+tie-break," which is a different, much harsher rule that happens to agree
+with the intended one everywhere except at the extreme it actually landed
+on. The six unanswerable questions in this gold set were deliberately built
+across a difficulty gradient (off-domain at 0.42 up to a superseded fact at
+0.80), and the objective, given six targets at genuinely different
+difficulty, walked the threshold all the way up to clear the hardest one --
+paying for it in recall the whole way, since nothing in the objective ever
+weighed that cost. Caught the same way every other number in this project
+gets caught: not by re-reading the formula, but by running it and looking at
+what it actually chose against the table it was chosen from. Fixed by
+constraining the search -- never give up achievable recall, then maximize
+refusals among the thresholds that don't cost any -- which on this gold set
+lands at 0.42 (recall@5 stays at its ceiling of 27/28; only the one
+unambiguous off-domain question gets refused; the harder ones are left for
+invariant 11's other, not-yet-built check).
+**Interview answer:** "A selection objective can be logically correct and
+still pick a bad answer, if the stated policy it's implementing was more
+nuanced than the literal rule I coded. I don't trust a suggested value
+without looking at the row it came from in the full table -- here, 0.80
+looked reasonable as a lone number and obviously wrong next to '1/28 kept.'
+The fix wasn't a bug fix, it was replacing a lexicographic objective with a
+constrained one: preserve the ceiling on what's achievable, then optimize
+what's left."

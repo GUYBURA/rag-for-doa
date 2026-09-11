@@ -194,8 +194,14 @@ retroactive/admin re-promotion flow.
 it needs a database with the real corpus ingested, which CI does not have, so
 it is not part of the test suite.
 
+`query/rerank.py` exists: `rerank(question, passages, scorer=..., threshold=,
+top_k=)` filters/sorts/cuts, with `openrouter_rerank_scorer()` (VoyageAI's
+rerank-2.5-lite via OpenRouter) as the real `Scorer`. `SCORE_THRESHOLD` is
+calibrated against `eval/questions.yaml` (see the constant's own comment and
+`eval/run_eval.py --sweep`), not guessed.
+
 Not written yet, so the command does not exist: `db/seed.sql`, `app/main.py`,
-`query/rerank.py`, `query/prompt.py`, `query/guards.py`.
+`query/prompt.py`, `query/guards.py`.
 
 ## Conventions
 
