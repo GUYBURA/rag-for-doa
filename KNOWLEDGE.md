@@ -776,3 +776,160 @@ enforcement. Once I turned on the provider's JSON mode the problem vanished
 across all three models. I kept the prompt rule for intent and the parse-error
 retry for the failures a schema can't catch -- a well-formed reply that cites
 a document I never sent it."
+
+### Concept: Grounding is not relevance, and one threshold cannot do both
+
+**Definition:** Relevance asks "is this passage about the question". Grounding
+(also called faithfulness) asks "does this answer match the passage it cites".
+They are different questions about different pairs of texts, and a retrieval
+system that only measures the first has no opinion at all about the second.
+
+**Why it matters here:** the rerank threshold was calibrated at 0.42 and it
+works, for what it does. What it demonstrably cannot do was measured on the
+gold set: the hard negatives -- a real pest with the wrong crop, a fact that
+2565 carried and 2568 dropped, a crop absent from the corpus -- score 0.62 to
+0.80, straddling real positives. There is no threshold that refuses them and
+keeps recall, because *relevance is genuinely high* in every one of those
+cases. The passage really is about prochloraz. It is just not about durian.
+So the near-miss passage reaches the model, and the model answers, and the
+answer cites a page that does not contain the claim -- which invariant 10
+exists to forbid. `parse_answer()` cannot see it either: `[1]` exists, `[1]`
+points at the right page, and only the dose is wrong. The check has to compare
+the answer against the excerpt, which is a second pass over different inputs,
+not a tighter setting on the first.
+
+**Interview answer:** "My reranker score is a relevance score, and I could
+show that no value of it separated my hard negatives from my positives --
+they overlapped, 0.62 to 0.80, because those negatives really were relevant.
+The failure they produce isn't an irrelevant answer, it's a confidently cited
+one where the citation is real and the number in it isn't. That needs a second
+check comparing the answer to the excerpt, not a stricter first one. Relevance
+and faithfulness are different measurements and I stopped trying to get one
+threshold to do both."
+
+### Concept: A guard that never fires and a guard that does not exist look identical
+
+**Definition:** An LLM-as-judge check is only as good as the evidence that it
+ever says no. Unlike a parser, it cannot crash when it is wrong -- it returns
+a cheerful verdict either way -- so its failure mode is silence, and silence
+is what a working guard also produces.
+
+**Why it matters here:** every unit test of the grounding check stubs the
+judge, which means every one of them tests `guards.py`'s routing and none of
+them tests whether a model reading Thai pesticide guidance can tell 20 ml from
+40 ml. Those are separate claims and only live tests against the real judge
+can make the second one. The fixtures for those tests have to be wrong in the
+way real answers are wrong: an altered dose, an extra sentence about spraying
+every 7 days, the right chemical attributed to the wrong crop. An obviously
+absurd fixture ("this pesticide cures cancer") is passed by any judge, so a
+suite built from those would be green against a judge that always says yes.
+
+A related decision: the judge is `deepseek/deepseek-v4-flash-0731` while the
+answering model is `z-ai/glm-5.3-flash`. A model grading its own output has a
+measured bias toward passing it (self-preference bias). The bias is weaker
+here than in general -- the judge sees only the answer text and the excerpts,
+never the reasoning that produced them, so it is reading a stranger's work --
+but a second vendor costs the same and removes the question. The model id is a
+dated snapshot rather than the floating alias for the same reason
+`document.embedding_model` is pinned: an alias repointed upstream changes what
+the guard lets through with no diff to review.
+
+**Interview answer:** "The dangerous thing about an LLM judge is that a broken
+one and a working one both stay quiet. So I don't count green unit tests as
+evidence it works -- those only prove my routing. I prove the judge itself by
+feeding it answers that are wrong the way real answers are wrong: a dose
+changed from 20 to 40, a fabricated extra instruction, the right chemical on
+the wrong crop. And I don't let the answering model grade itself, because
+self-preference bias is real and a second vendor costs nothing."
+
+### Concept: A guard has two failure modes, and they need opposite responses
+
+**Definition:** "I checked and it fails" and "I could not check" are different
+outcomes. Collapsing them into one boolean loses the distinction exactly where
+it decides what to do next.
+
+**Why it matters here:** an ungrounded answer should be retried -- the model
+may write a better one from the same excerpts. A judge that is down, or that
+returned `{"grounded": "maybe"}`, should not be retried, because asking the
+answering model again cannot repair the judge; it spends a second paid call to
+arrive at the same unknown. Same guard, opposite correct responses.
+
+The mechanism is the exception hierarchy, not an `if`. `NotGrounded` inherits
+from `ValueError`, so `answer.py`'s existing `except ValueError: continue` --
+written for malformed JSON and invented citations -- picks it up with no new
+code and no second retry counter. `MAX_ATTEMPTS` stays the one ceiling on
+model calls however the failures are mixed. `GroundingUndecided` deliberately
+does *not* inherit from `ValueError`, so it falls past that handler into its
+own `except`, which refuses immediately. The unreachable-judge case is folded
+in there too: `check_grounding` catches `openai.OpenAIError` and re-raises it
+as `GroundingUndecided`, because `app/main.py` catches nothing and an escaped
+exception would turn a judge outage into a 500 -- and a 500 is worse than a
+refusal, since a refusal is a documented outcome and an unhandled error
+invites the client to retry.
+
+That base class is load-bearing enough that mutating `NotGrounded(ValueError)`
+to `NotGrounded(Exception)` kills the retry tests, and mutating
+`GroundingUndecided(Exception)` to inherit `ValueError` kills the
+no-retry test. Both were verified, not assumed.
+
+**Interview answer:** "Fail-closed isn't one rule, it's two. 'The check says
+no' and 'the check couldn't run' need opposite handling -- retry the first,
+never retry the second -- so they're different exception types. I made the
+retryable one inherit from ValueError so it lands in the retry loop that
+already existed, which means grounding failures share one attempt budget with
+parse failures instead of doubling it. The control flow comes from the class
+hierarchy rather than from branching, and I proved it by mutation: change
+either base class and a specific test goes red."
+
+### Concept: A checksum is how a PII regex stops eating its own corpus
+
+**Definition:** Structured identifiers usually carry a check digit. Validating
+it turns "this is thirteen digits" -- which matches a great deal of text --
+into "this is a well-formed identifier", which matches far less.
+
+**Why it matters here:** PII detection is regex and not a model, for three
+reasons in order of weight. The check runs *before* the question reaches any
+third party, so a check that is itself an API call defeats its own purpose.
+The answer is yes or no with no judgement in it. And the corpus is pesticide
+guidance, which is made of numbers -- doses, concentrations, percentages,
+page and table references -- so the false-positive surface is exactly what a
+pattern can be written to exclude and a model would have to be trusted about
+question by question.
+
+A Thai national ID is 13 digits. So is an ISBN-13, printed on the cover of
+every volume in this corpus. Length alone flags all of them; the ID's check
+digit (`sum(d[i] * (13 - i)) % 11`, check = `(11 - r) % 10`) rejects most.
+**Most, not all** -- `9786163581234` satisfies the Thai ID checksum by
+coincidence, as roughly one ISBN in ten will. The checksum cuts this class of
+false positive by about 90%, and claiming more than that would be wrong.
+
+Bank account numbers were considered and rejected: 10 to 12 digits with no
+public check digit, which makes them indistinguishable from any other long
+number, and there is no second signal to fall back on.
+
+The inbound and outbound checks are deliberately not the same set. Outbound
+looks for ID numbers and emails but **not** phone numbers: a government
+handbook that prints its own department's switchboard would have that number
+quoted back in a correct answer, and an institutional contact line is public
+information about an organisation, not personal data about a person. Refusing
+that answer protects nobody. An ID number in the output has no such excuse --
+it could only have come from the model inventing one.
+
+**Unverified as of writing:** the 4-page test fixture contains no
+phone-shaped strings, which proves nothing about the ~900 pages of the three
+real volumes. If a scan of the full corpus finds none either, the carve-out
+costs a real check for a risk that does not exist and should be narrowed.
+The asymmetry is the right shape; its current setting is an assumption.
+
+**Interview answer:** "Personal-data detection is the one place I didn't reach
+for a model, because the check has to run before the text leaves the process
+and a model call is exactly what I'm trying to avoid. The interesting part was
+false positives: my corpus is nothing but numbers, and a Thai ID card and an
+ISBN-13 are both thirteen digits with hyphens. Validating the ID's check digit
+removes about ninety percent of that -- not all of it, roughly one ISBN in ten
+satisfies it by coincidence. I also made the outbound check narrower than the
+inbound one: a government handbook prints its own department's phone number,
+and blocking an answer that quotes its source would protect nobody. That last
+one is still an assumption -- I haven't scanned the full corpus to confirm the
+number is actually in there, and I've written it down as unverified rather
+than as a finding."

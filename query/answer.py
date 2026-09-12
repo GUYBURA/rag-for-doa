@@ -20,6 +20,16 @@ import psycopg
 from langchain_postgres import PGVectorStore
 from openai import OpenAI
 
+from query.guards import (
+    PII_REFUSAL_TEXT,
+    GroundingUndecided,
+    Judge,
+    PIIDetected,
+    check_answer_text,
+    check_grounding,
+    check_question,
+    deepseek_judge,
+)
 from query.prompt import REFUSAL_TEXT, Answer, build_prompt, parse_answer
 from query.rerank import Scorer, openrouter_rerank_scorer, rerank
 from query.retrieve import CANDIDATES, retrieve
@@ -82,11 +92,17 @@ def answer(
     *,
     chat: Chat = openrouter_chat,
     scorer: Scorer = openrouter_rerank_scorer,
+    judge: Judge = deepseek_judge,
     k: int = CANDIDATES,
 ) -> Answer:
     """Answer one question from the active corpus, or refuse.
 
-    Two refusals, and neither is delegated to the model:
+    Four refusals, and none of them is delegated to the answering model:
+
+    The question carries personal data -- an ID card number, a phone number,
+    an email. Nothing is retrieved and no API is called, so the data never
+    leaves this process, which is the only reason the check is worth having
+    before retrieval rather than after.
 
     Nothing survives reranking -- the corpus has no passage relevant enough to
     ground an answer, which Python knows for certain from an empty list. The
@@ -94,16 +110,30 @@ def answer(
     decline would be trusting it not to answer from what it already knows
     about pesticides, which is a great deal.
 
-    The model returns something ungrounded -- malformed JSON, or a citation
-    number that was never sent to it. Ask once more, and if it happens again,
-    refuse. A model citing an excerpt that does not exist is the failure mode
-    invariant 10 exists to prevent, so it can never be passed through.
+    The model returns something ungrounded -- malformed JSON, a citation
+    number that was never sent to it, or an answer the judge finds unsupported
+    by the excerpt it cites. Ask once more, and if it happens again, refuse. A
+    model citing an excerpt that does not exist is the failure mode invariant
+    10 exists to prevent, so it can never be passed through. All three share
+    one budget: NotGrounded is a ValueError precisely so the loop below needs
+    no second counter, and MAX_ATTEMPTS stays the ceiling on model calls
+    however the failures are mixed.
+
+    The judge itself is unreachable or unreadable. Refuse at once, without
+    retrying -- asking the answering model again cannot repair a broken judge,
+    it only spends a second call to reach the same unknown. Fail closed:
+    unverified is not served.
 
     A reply with no citations is NOT retried. "These excerpts do not answer
     this question" is a correct outcome, not a malfunction -- retrying it would
     double the cost and latency of precisely the questions the system is meant
     to decline.
     """
+    try:
+        check_question(question)
+    except PIIDetected:
+        return Answer(PII_REFUSAL_TEXT, [])
+
     passages = retrieve(store, conn, question, k=k)
     scored = rerank(question, passages, scorer=scorer)
     if not scored:
@@ -112,7 +142,19 @@ def answer(
     prompt = build_prompt(question, scored)
     for _ in range(MAX_ATTEMPTS):
         try:
-            return parse_answer(chat(prompt.text), prompt)
-        except ValueError:  # json.JSONDecodeError is one of these
+            # Order matters: grounding is checked after the reply parses and
+            # before it is returned. Checking it afterwards would mean the
+            # unsupported answer had already been served.
+            parsed = parse_answer(chat(prompt.text), prompt)
+            check_grounding(question, parsed, judge=judge)
+            check_answer_text(parsed.text)
+            return parsed
+        except ValueError:  # json.JSONDecodeError and NotGrounded are these
             continue
+        except GroundingUndecided:
+            return Answer(REFUSAL_TEXT, [])
+        except PIIDetected:
+            # Not retried: the excerpts that produced this are the same
+            # excerpts the next attempt would get.
+            return Answer(PII_REFUSAL_TEXT, [])
     return Answer(REFUSAL_TEXT, [])

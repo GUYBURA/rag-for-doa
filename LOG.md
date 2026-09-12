@@ -163,3 +163,29 @@ docstring that it makes no judgement calls: a first data row that happened to
 be complementary would be silently absorbed into the header. Left undone
 deliberately, and the discarded option recorded here because the layout
 complaint that prompted this fix is only partly addressed by it.
+
+### Bug: 13 testcontainers tests error with "Port mapping ... is not available"
+
+**Status:** Fixed (worked around)
+**Date:** 2026-09-12
+**Cause:** Not the test suite and not a schema change. Every test that takes a
+container fixture errored at setup with
+`ConnectionError: Port mapping for container <id> and port 8080 is not
+available` -- port 8080 being Ryuk's, testcontainers' reaper sidecar, not
+Postgres's. `docker ps` showed the Ryuk container running and healthy, which
+is what made this misleading: Docker was up, the image was present, and the
+failure still looked like the DB layer had broken. It is testcontainers being
+unable to read back the host port mapping for the reaper in this environment.
+
+**Solution:** `TESTCONTAINERS_RYUK_DISABLED=true` before pytest. The reaper
+only cleans up abandoned containers after a crashed run; without it the
+containers must be removed by hand if a run dies, which is an acceptable trade
+locally. With it set, the same command goes from `171 passed, 13 errors` to
+`184 passed`.
+
+**Tried and rejected:** re-running (the Ryuk container id changes each time
+and so does nothing); assuming the guards change had broken something, which
+it had not -- the errors are all at *fixture setup*, before any test body
+runs, and that is the tell. A stack trace that ends inside
+`testcontainers/core/docker_client.py` is never about the code under test.
+Worth remembering before debugging the wrong file for an hour.
