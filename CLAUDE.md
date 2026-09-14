@@ -185,7 +185,7 @@ docker compose down -v                # reset: drops the volume, schema reapplie
 pytest
 pytest -m "not requires_source_pdfs"  # full local suite: live API calls included
 python tests/fixtures/make_fixture.py # rebuild the extract fixture from the source PDFs
-uvicorn app.main:app --reload         # local only -- no auth until guards.py exists
+uvicorn app.main:app --reload         # local only -- no auth, no rate limit
 ```
 
 What CI runs is narrower, and the filter lives in `.github/workflows/test.yml`:
@@ -213,6 +213,17 @@ edition-correctness questions — the one supersession negative turned out to be
 mislabelled, because the check that built it was section-scoped and most chunks
 have no section (LOG.md). Do not add one back until section detection is fixed.
 
+`run_eval.py` stops at `rerank()` — it measures retrieval and the threshold, and cannot
+see the model or the guards. `eval/run_answer_eval.py` runs the same gold set through the
+full `answer()` path (real model, real judge) and reports answered / cited-correctly /
+refused / judge rejections. `--judge off` swaps in an always-grounded judge **for
+comparison only**, to measure what the guard changes; it exists in the eval script and
+nowhere in `query/`. `--set attacks` runs `eval/attacks.yaml` instead — direct prompt
+injection plus benign look-alikes that must still be answered — and prints every answer,
+because a `refuse_or_grounded` pass-by-answering needs a human read. Kept out of
+`questions.yaml` so it never moves the `--sweep` threshold. A `must_not_contain` canary
+must be checked absent from the corpus before it is added (`DDT` was in 3 real chunks).
+
 `query/rerank.py` exists: `rerank(question, passages, scorer=..., threshold=,
 top_k=)` filters/sorts/cuts, with `openrouter_rerank_scorer()` (VoyageAI's
 rerank-2.5-lite via OpenRouter) as the real `Scorer`. `SCORE_THRESHOLD` is
@@ -237,11 +248,31 @@ a `Chat` protocol, like `Scorer` in `rerank.py`. `ANSWER_MODEL` was chosen by ru
 full gold set through three candidates — see the constant's comment for the table.
 
 `app/main.py` runs with `uv run uvicorn app.main:app --reload`: `POST /ask` and
-`GET /health`. Refusal is a `200` with an empty `citations` list, never a `404`. **Do not
-deploy it** — there is no auth, no rate limit and no input guard until `query/guards.py`
-exists.
+`GET /health`. Refusal is a `200` with an empty `citations` list, never a `404`.
 
-Not written yet, so the command does not exist: `db/seed.sql`, `query/guards.py`.
+`query/guards.py` exists and holds two checks, both called only from `answer()`:
+- **Grounding** (invariant 11): `check_grounding()` sends the question, the answer text and
+  **only the cited passages** to `JUDGE_MODEL` — a different vendor from `ANSWER_MODEL`,
+  pinned to a dated snapshot. It takes an `Answer`, not a passage list, so uncited passages
+  cannot reach the judge. Binary verdict, no threshold. `NotGrounded` is a `ValueError` so
+  it shares `answer()`'s single retry budget; `GroundingUndecided` (judge down or
+  unreadable) is not, so it refuses immediately — fail closed.
+- **PII**: regex, not a model, so it runs before anything leaves the process.
+  `check_question()` refuses before `retrieve()`; `check_answer_text()` checks the output.
+  A PII refusal uses `PII_REFUSAL_TEXT`, not `REFUSAL_TEXT`. `ANSWER_PII_KINDS` omits
+  phone numbers on an assumption the handbooks print contact lines — a scan of the 519
+  active 2568 chunks found none, so that carve-out is pending removal.
+- **Prompt injection** (direct only): no separate classifier. Rule 5 of
+  `JUDGE_INSTRUCTIONS` makes anything added that is not from the excerpts — a marker, code,
+  a poem, a followed instruction — ungrounded, while plain framing stays allowed. Chosen by
+  measurement: `eval/attacks.yaml` got 7/9 attacks blocked with a claim-only judge, 9/9
+  with rule 5, benign 4/4 both times. Indirect injection through the corpus is out of
+  scope while only an admin uploads DOA handbooks (KNOWLEDGE.md). Rewording rule 5 or the
+  `INSTRUCTIONS` rules quoted as canaries in `attacks.yaml` means re-running both sets.
+
+**Do not deploy it** — there is still no auth and no rate limit.
+
+Not written yet, so the command does not exist: `db/seed.sql`.
 
 ## Conventions
 
