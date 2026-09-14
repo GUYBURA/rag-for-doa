@@ -12,11 +12,20 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, get_answerer
+from app.main import (
+    RATE_LIMIT_PER_WINDOW,
+    RATE_LIMIT_WINDOW_SECONDS,
+    FixedWindowLimiter,
+    app,
+    get_answerer,
+    get_api_keys,
+    get_limiter,
+)
 from query.prompt import REFUSAL_TEXT, Answer, Citation
 from query.retrieve import Passage
 
 TITLE = "คำแนะนำการใช้สารป้องกันกำจัดศัตรูพืช ฉบับปี 2568"
+KEY = "test-key-0123456789abcdefghij"
 
 
 def _citation(number: int) -> Citation:
@@ -42,8 +51,16 @@ def _citation(number: int) -> Citation:
 def client():
     """Cleared after each test: dependency_overrides lives on the app object,
     so a leaked one would quietly answer a later test's requests.
+
+    Auth stays on here and every request carries a real key -- these tests
+    are about response shape, and switching auth off to test that would
+    leave nothing proving the shape survives with auth in front of it. Auth
+    and the limit themselves are tested in test_auth.py.
     """
-    yield TestClient(app)
+    app.dependency_overrides[get_api_keys] = lambda: frozenset({KEY})
+    limiter = FixedWindowLimiter(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW_SECONDS)
+    app.dependency_overrides[get_limiter] = lambda: limiter
+    yield TestClient(app, headers={"X-API-Key": KEY})
     app.dependency_overrides.clear()
 
 

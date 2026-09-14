@@ -997,3 +997,102 @@ the gap was in the judge, and I closed it there with one rule and a twin test
 proving ordinary phrasing still passes. When a later run refused a normal
 question, I held the answer fixed and swapped only the judge prompt to show
 the rule wasn't the cause."
+
+### Concept: An in-memory rate limit is a burst guard, not a budget guard
+
+**Definition:** A rate limiter counts requests per caller over a time window
+and rejects the excess. Where the count is stored decides what it can
+promise: memory in one process, or a store every instance shares.
+
+**Why it matters here:** `/ask` is protected by two shared API keys (one for
+the Vercel server route, one for manual testing) and a per-key limit of 10
+requests per fixed 60 s window, counted in a dict inside the process. That is
+the cheapest thing that can be correct, and it is correct under exactly one
+condition: a single instance. Cloud Run gives every instance its own memory,
+so three instances would quietly allow thirty. Deploying with
+`max-instances=1` is not a tuning choice, it is what makes the code true.
+Scaling out later means moving the count to a shared store, not changing a
+number.
+
+The less obvious limit: Cloud Run scales to zero when idle, and that wipes
+memory. A daily cap held in the same dict would reset every time the service
+slept -- ask 100 questions, wait for it to idle, ask 100 more. So there is no
+daily cap in the app at all. The money ceiling is the OpenRouter key's
+spending limit, which lives outside the process and survives every restart,
+plus a GCP budget alert. The limiter's only job is stopping bursts and
+runaway loops, and a 60 s window is short enough that memory is a fine place
+for it.
+
+Three details that tests pin, each with the mutation that proves it:
+- Auth resolves before counting (`enforce_rate_limit` depends on
+  `require_api_key`). Counting first would answer the 11th garbage request
+  with 429 instead of 401 and keep an entry per garbage key -- unbounded
+  memory. Mutating the order turns
+  `test_rejected_keys_do_not_consume_a_valid_keys_quota` red.
+- Missing and wrong keys return the same body, so a reply never confirms the
+  header name. Different messages turn
+  `test_a_wrong_key_is_indistinguishable_from_a_missing_one` red.
+- `parse_api_keys` drops blank entries; a trailing comma in `API_KEYS` would
+  otherwise make an empty header authenticate.
+
+One guarantee has no test: `hmac.compare_digest` instead of `==`. String `==`
+stops at the first differing character, so response time leaks how much of a
+guessed key matched. The difference is nanoseconds and no functional test
+can see it -- the mutation to `==` survives the suite, as expected. It is
+guarded by a comment and review, and saying so is more honest than writing a
+test that claims to cover it.
+
+Where the key lives matters as much as how it is checked. A frontend on
+Vercel calling Cloud Run from the browser would ship the key in the
+JavaScript bundle. The browser calls a Vercel server route, and only that
+route holds the key. The consequence is that every visitor shares one key and
+therefore one quota, so per-visitor limiting has to happen at the Vercel
+layer, by IP -- a separate job from protecting the API.
+
+**Interview answer:** "I rate-limited in memory on purpose and made that
+correct by pinning Cloud Run to one instance, because a shared store costs
+money even idle and my budget is about ten dollars a month. The trap was
+scale-to-zero: an idle service loses its memory, so an in-memory daily cap
+resets whenever nobody is using it. So I split the jobs. The app only stops
+bursts, over a one-minute window where losing memory doesn't matter, and the
+actual spending ceiling is a limit on the API key at the model provider,
+outside my process. Auth runs before counting so garbage keys can't grow
+memory, and I proved each of those properties with a mutation -- except
+constant-time key comparison, which no test can observe, and I've documented
+that instead of pretending."
+
+### Concept: Resolving an assumption you wrote down
+
+**Definition:** An "Unverified as of writing" note is a debt with a stated
+condition for paying it off. Paying it means running the measurement and
+then doing what the note said the result would mean -- even when that is
+deleting the design it defended.
+
+**Why it matters here:** the entry "A checksum is how a PII regex stops
+eating its own corpus" (above) records that outbound PII checks exempted
+phone numbers, on the belief that the handbooks print a department
+switchboard, and says plainly that this was an assumption: if the full
+corpus has no phone-shaped strings, the carve-out buys nothing and should be
+narrowed. The scan was run with the exact `thai_phone` pattern the guard
+uses, over all 519 active chunks: zero matches. So `ANSWER_PII_KINDS` is now
+`INPUT_PII_KINDS`.
+
+The test that used to assert a department number was *allowed* in an answer
+was rewritten to assert it is *caught*, and went red against the old code
+(`DID NOT RAISE PIIDetected`) before the one-line change turned it green --
+the change is proven by a test that failed first, not just by one that
+passes.
+
+Scope of the measurement, stated so nobody over-reads it: 519 chunks is the
+active corpus, which is the only text an answer can be built from. The
+archived 2565 and 2566 volumes have no chunks to scan. A future edition could
+print a contact line; if it does, the answer is to re-scan and decide on the
+new number, not to restore the old assumption.
+
+**Interview answer:** "I'd designed an exception into my PII guard -- let
+phone numbers through on the way out, because I assumed the government
+handbooks print their department's number. I wrote down at the time that it
+was an assumption and what would disprove it. Later I scanned the whole
+active corpus with the guard's own regex and found no phone numbers at all,
+so the exception protected nothing and just left a gap. I flipped the test
+first so it failed against the old behaviour, then removed the exception."

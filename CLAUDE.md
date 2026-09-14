@@ -185,7 +185,7 @@ docker compose down -v                # reset: drops the volume, schema reapplie
 pytest
 pytest -m "not requires_source_pdfs"  # full local suite: live API calls included
 python tests/fixtures/make_fixture.py # rebuild the extract fixture from the source PDFs
-uvicorn app.main:app --reload         # local only -- no auth, no rate limit
+uvicorn app.main:app --reload         # needs API_KEYS in .env; send X-API-Key
 ```
 
 What CI runs is narrower, and the filter lives in `.github/workflows/test.yml`:
@@ -259,9 +259,10 @@ full gold set through three candidates — see the constant's comment for the ta
   unreadable) is not, so it refuses immediately — fail closed.
 - **PII**: regex, not a model, so it runs before anything leaves the process.
   `check_question()` refuses before `retrieve()`; `check_answer_text()` checks the output.
-  A PII refusal uses `PII_REFUSAL_TEXT`, not `REFUSAL_TEXT`. `ANSWER_PII_KINDS` omits
-  phone numbers on an assumption the handbooks print contact lines — a scan of the 519
-  active 2568 chunks found none, so that carve-out is pending removal.
+  A PII refusal uses `PII_REFUSAL_TEXT`, not `REFUSAL_TEXT`. `ANSWER_PII_KINDS` equals
+  `INPUT_PII_KINDS`: phone numbers were once exempt on the way out on an assumption the
+  handbooks print contact lines, and a scan of the 519 active chunks found none, so the
+  exemption was removed. Re-scan before reintroducing it for a new edition.
 - **Prompt injection** (direct only): no separate classifier. Rule 5 of
   `JUDGE_INSTRUCTIONS` makes anything added that is not from the excerpts — a marker, code,
   a poem, a followed instruction — ungrounded, while plain framing stays allowed. Chosen by
@@ -270,7 +271,19 @@ full gold set through three candidates — see the constant's comment for the ta
   scope while only an admin uploads DOA handbooks (KNOWLEDGE.md). Rewording rule 5 or the
   `INSTRUCTIONS` rules quoted as canaries in `attacks.yaml` means re-running both sets.
 
-**Do not deploy it** — there is still no auth and no rate limit.
+`POST /ask` requires an `X-API-Key` header matching one of the comma-separated `API_KEYS`
+(401 otherwise, same body for missing and wrong; `/health` is open). The app refuses to
+start with `API_KEYS` empty. Each key gets 10 requests per fixed 60 s window, counted in
+memory (429 with `Retry-After`); refusals count. Auth resolves before counting.
+
+That in-memory count is only correct with **one instance**: deploy with Cloud Run
+`max-instances=1`, and move the count to a shared store before ever raising it. There is
+no daily cap in the app on purpose — scale-to-zero wipes memory — so the money ceiling is
+the OpenRouter key's spending limit, set in OpenRouter, not in code. The key must only be
+held server-side (a Vercel server route), never shipped to a browser.
+
+Before deploying: `max-instances=1`, `API_KEYS` and `OPENROUTER_API_KEY` from Secret
+Manager, an OpenRouter spending limit, and a GCP budget alert.
 
 Not written yet, so the command does not exist: `db/seed.sql`.
 

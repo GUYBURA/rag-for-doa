@@ -161,19 +161,15 @@ _PATTERNS = {
 # Everything, on the way in.
 INPUT_PII_KINDS = frozenset(_PATTERNS)
 
-# Not everything, on the way out, and the difference is not an oversight. The
-# answer is assembled from a government handbook, and a handbook that prints
-# its own department's switchboard would have that number quoted back in a
-# correct answer. An institutional contact line is public information about an
-# organisation, not personal data about a person, so refusing that answer
-# protects nobody. An ID card number or a personal email in the output has no
-# such excuse: it could only have come from the model inventing one.
-#
-# Assumption, not a measurement: the 4-page test fixture has no phone-shaped
-# strings in it, and the three real volumes have not been scanned. If none of
-# them carries a contact number either, this carve-out is buying nothing and
-# should be narrowed to match INPUT_PII_KINDS.
-ANSWER_PII_KINDS = frozenset({"thai_national_id", "email"})
+# The same kinds on the way out. Phone numbers used to be exempt here, on the
+# assumption that a handbook printing its department's switchboard would have
+# that number quoted back in a correct answer. That was measured rather than
+# kept: the thai_phone pattern matches none of the 519 active chunks, so no
+# correct answer could contain one, and any phone number in an answer could
+# only have come from the model or the question. If a future edition does
+# print a contact line, re-scan and reconsider -- with a measurement, not the
+# old assumption.
+ANSWER_PII_KINDS = INPUT_PII_KINDS
 
 
 def _has_valid_id_checksum(digits: str) -> bool:
@@ -217,8 +213,9 @@ def check_question(question: str) -> None:
 
 
 def check_answer_text(text: str) -> None:
-    """Raise PIIDetected if the answer must not be returned. See
-    ANSWER_PII_KINDS for why this checks less than check_question does.
+    """Raise PIIDetected if the answer must not be returned. Checks the same
+    kinds as check_question; see ANSWER_PII_KINDS for the carve-out that was
+    measured and removed.
     """
     kinds = find_pii(text, kinds=ANSWER_PII_KINDS)
     if kinds:
