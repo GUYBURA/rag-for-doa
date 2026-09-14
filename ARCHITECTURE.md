@@ -111,7 +111,7 @@ directly with no subclass. The DDL is ours.
 | Column | Type | Purpose |
 |---|---|---|
 | `langchain_id` | uuid PK | |
-| `content` | text | Raw extracted text, un-normalized |
+| `content` | text | Normalized text — the exact string that is hashed and embedded |
 | `embedding` | vector(768) NOT NULL | |
 | `document_id` | uuid FK → `document` | |
 | `page_number` | int | So citations point at a real page |
@@ -121,10 +121,16 @@ directly with no subclass. The DDL is ours.
 | `content_tsv` | tsvector | Sparse half of hybrid retrieval |
 | `created_at` | timestamptz | |
 
-Storing raw `content` while hashing normalized text is deliberate. Roughly **48% of 2568's
-prose lines are byte-identical to 2565's** after normalization, so an un-normalized hash
-would miss real duplicates entirely. Keeping `content` raw preserves what the PDF actually
-said, which matters when a citation is disputed.
+`content` and `content_sha256` are deliberately the same string: normalized text, computed
+once in `chunk.py`. Raw text never reaches `chunk`. Two reasons. The running footer that
+normalization strips carries the edition year, and a chunk embedded with "2568" baked into
+it would stay findable by edition after 2568 is superseded. And roughly **48% of 2568's
+prose lines are byte-identical to 2565's** after normalization, so a hash of anything other
+than what is embedded would make the dedup index compare the wrong thing. What the PDF
+literally said is preserved by the source file itself, identified by `document.file_hash`.
+
+(An earlier version of this document said `content` stored raw text. It never did in the
+implementation; `CLAUDE.md` invariant 8 is the authority.)
 
 `content_tsv` is populated by the ingest pipeline from PyThaiNLP `newmm` output rather than
 by a generated column: Postgres has no Thai word-boundary parser, so tokenization happens in
@@ -147,6 +153,11 @@ promote.
 
 ## Ingestion pipeline
 
+The diagram is the target shape on Google Cloud. Today `ingest(conn, pdf_path, meta)` in
+`ingest/run.py` is called by a script with a hand-built `DocumentMeta`, and the first cloud
+deployment will run that same call from a workstation through the Cloud SQL Auth Proxy.
+The job-based shape below comes once there is an upload interface to trigger it.
+
 ```
 PDF upload → Cloud Storage → Eventarc → Workflows → Cloud Run Job
                                                         │
@@ -160,18 +171,26 @@ PDF upload → Cloud Storage → Eventarc → Workflows → Cloud Run Job
 **File hash check.** `document.file_hash` rejects re-uploads of identical bytes before any
 parsing cost is incurred.
 
-**Parsing.** PyMuPDF, with layout and table extraction and an OCR fallback for scanned
-pages. pdfplumber was evaluated and rejected — see [Thai text handling](#thai-text-handling).
+**Parsing.** PyMuPDF text blocks plus table geometry, with table cells read by
+`page.get_text("text", clip=cell_rect)` rather than PyMuPDF's own table text, which
+displaces Thai below-vowels. There is no OCR fallback. pdfplumber was evaluated and
+rejected — see [Thai text handling](#thai-text-handling).
 
-**Parsing QA gate.** Blocking. A document does not enter the index until it passes:
+**Parsing QA gate.** Blocking. A document does not enter the index until it passes. Each
+check records what it measured and the threshold, not just a verdict:
 
 | Check | Failure means |
 |---|---|
-| Page count matches PDF | Extraction dropped pages |
-| Tables extracted | Recommendation tables lost — the highest-value content |
-| Layout extraction succeeded | Column/section structure lost |
-| OCR confidence above threshold | Scanned page transcribed unreliably |
-| Thai combining marks intact | Silent text corruption |
+| `page_numbers_not_sequential` | Extraction reordered or skipped pages |
+| `page_count_mismatch` | Extracted page count differs from the PDF's |
+| `empty_ratio_too_high` | Too many pages came out with no text |
+| `thin_pages` | Recorded only — pages with very little text |
+| `unmapped_pua_codepoints` | Thai private-use tone marks with no known mapping |
+| `symbol_pua_codepoints` | Recorded only — symbol-font glyphs that cannot be repaired without span fonts |
+| `combining_ratio_too_low` | Thai vowels and tone marks lost (floor 0.20; real volumes measure ~0.33) |
+| `no_thai_consonants` | No Thai text at all |
+| `tables_found` | Recorded only — how many tables were detected |
+| `scopes_empty` | No hand-entered subject scopes, so supersession cannot be decided |
 
 Results are written to `document.qa`, so a failure is inspectable rather than silent. There
 is no bypass flag: a document that fails stays `pending` with a recorded reason, rather than
@@ -193,18 +212,41 @@ chunks in one transaction.
 ## Query pipeline
 
 ```
-User → Input Guard → Embed → Hybrid Retrieval → Re-rank → Prompt Build → LLM
-       (PII,          (dense +   (pgvector)     (top 5,   (cite source,
-        injection)     sparse)                   score ≥    edition, page)
-                                                 threshold)
-                                                     │
-                                                     ├─ nothing above threshold
-                                                     │  → "no relevant document"
-                                                     ▼
-                                          Output Guard (PII, grounding)
-                                                     │
-                                          retry once, else refuse
+Client ─→ API key (401) ─→ rate limit per key (429)            app/main.py
+            │
+            ▼
+         PII in question? ── yes ─→ PII refusal (nothing searched)  query/guards.py
+            │ no
+            ▼
+         Hybrid retrieval: dense + Thai-segmented sparse, RRF        query/retrieve.py
+            │
+            ▼
+         Rerank, keep top 5 with score ≥ threshold                    query/rerank.py
+            │ none ─→ refusal (model never called)
+            ▼
+         Prompt: numbered excerpts [n] + section label                query/prompt.py
+            │
+            ▼
+         ┌─→ LLM (JSON) ─→ parse: [n] must exist ──────────────┐     query/answer.py
+         │                  citations [] ─→ refusal (no retry)  │
+         │                                                      ▼
+         │               Grounding judge (other vendor, cited excerpts only)
+         │                  unreadable / down ─→ refusal (no retry)
+         │                                                      │
+         │               PII in answer? ─→ PII refusal          │
+         │                                                      │
+         └── parse error or ungrounded: retry once, then refuse ┘
+                                                                ▼
+                                             answer + citations built in Python
 ```
+
+**Authentication and rate limit** run before anything else, as FastAPI dependencies in the
+transport layer. The key is compared in constant time; missing and wrong keys get an
+identical response. The limit is 10 requests per key per fixed 60-second window, counted
+in process memory, and auth resolves first so rejected keys never occupy the limiter. An
+in-memory count is only correct with a single instance, which is how the service is to be
+deployed; there is no daily cap in the app, because a service that scales to zero loses
+that memory, and the spending ceiling belongs to a limit at the model provider.
 
 **Hybrid retrieval** combines dense vectors with sparse lexical matching. Thai pesticide
 names and active ingredients are largely transliterated or Latin-script chemical names, which
@@ -219,9 +261,28 @@ returns "no relevant document" rather than passing weak context to the model.
 **Citations** carry source document, edition year and page number, so a user can open the
 original PDF and verify. Page provenance is a hard requirement of prompt assembly.
 
-**Output guard** checks PII and grounding — whether each claim is supported by the retrieved
-passages. On failure the generation is retried once, then refused. Refusal is a first-class
-outcome, not an error path.
+**Grounding guard.** A judge model from a different vendor than the answering model — to
+avoid self-preference bias — receives the question, the answer, and **only the excerpts the
+answer cited**. `build_grounding_prompt()` takes an `Answer`, not a passage list, so uncited
+passages are unreachable by construction and an answer citing one excerpt while quoting
+another cannot pass. The verdict is binary, with no threshold to calibrate. Rule 5 of the
+judge's instructions treats anything added that no excerpt states — a marker, code, a poem,
+evidence of following an instruction — as unsupported, while allowing plain framing. That
+rule is the prompt-injection defence: an attack set showed the rest of the design already
+stopped 7 of 9 direct injections, and the two that passed both added non-claim content.
+
+Failure types are distinct exceptions. `NotGrounded` is a `ValueError`, so it shares the
+single retry budget with malformed JSON and invented citations. `GroundingUndecided` (judge
+unreachable or unreadable) is not, so it refuses immediately: re-asking the answering model
+cannot repair the judge.
+
+**PII guard.** Regular expressions, not a model, so the inbound check runs before the
+question leaves the process. Thai national IDs are validated by check digit. The same kinds
+are checked on the answer. Refusal for PII uses its own message, distinct from "no relevant
+document".
+
+Refusal is a first-class outcome, not an error path, and is an HTTP `200` with an empty
+citation list.
 
 ---
 
@@ -276,16 +337,30 @@ LangChain-compatible.
 
 ## Deployment
 
-| Concern | Service |
-|---|---|
-| Object store | Cloud Storage |
-| Ingestion orchestration | Eventarc → Workflows → Cloud Run Jobs |
-| Query API | Cloud Run Service |
-| Database and vectors | Cloud SQL for PostgreSQL + pgvector |
-| Embeddings, reranking, generation | Vertex AI |
-| Input/output guardrails | Model Armor |
-| Auth | Identity Platform + IAM |
-| Observability | Cloud Logging, Cloud Trace |
+**Status: not deployed.** Everything runs locally today, with models served through
+OpenRouter. The plan below is agreed, not built.
+
+| Concern | Planned | Notes |
+|---|---|---|
+| Query API | Cloud Run service, `max-instances=1` | One instance is what makes the in-memory rate limit correct |
+| Database and vectors | Cloud SQL for PostgreSQL 17 + pgvector, Enterprise edition, smallest shared-core machine | Paid from trial credit; a move to a cheaper host is planned before it expires |
+| Embedding, reranking, answer, judge | Vertex AI model APIs | Not Vertex AI Agent Engine: this is a fixed pipeline where Python makes every decision, not an agent |
+| Secrets | Secret Manager | `API_KEYS`, `DATABASE_URL`; no model API key once models run on Vertex via the service account |
+| Identity | Dedicated service account: Vertex AI user, Cloud SQL client, secret accessor | Not the default compute account |
+| Client auth | App-level API key, held server-side by a web frontend | Identity Platform deferred until there are end users |
+| Guardrails | In-app grounding judge + regex PII | Model Armor not evaluated |
+| Ingestion (first) | `ingest()` run from a workstation through the Cloud SQL Auth Proxy | Three volumes, run rarely |
+| Ingestion (later) | Cloud Storage + Cloud Run Job, same image | Triggered by an upload interface |
+| Spend control | Budget alert + spending limit at the model provider + single instance | A budget alert notifies; it does not stop spending |
+| Observability | Cloud Logging | |
+
+**Order.** Models move to Vertex AI *locally* first, one at a time — embedding, reranker,
+answer model, judge — each gated on the existing evaluation, before any infrastructure moves.
+Changing provider and infrastructure together would make a regression impossible to
+attribute. Changing the embedding provider means re-embedding the corpus (the model is
+pinned per document), and changing the reranker invalidates the calibrated threshold. The
+cloud database is then ingested and checked against the local one by `content_sha256`, row
+by row, before the service is containerized and deployed.
 
 Ingestion runs as a job rather than a service because it is bursty, long-running and
 tolerant of latency; the query path runs as a service because it is the opposite.
@@ -308,6 +383,15 @@ Abstention and citation validity are weighted deliberately. A system that answer
 confidently scores well on conventional RAG benchmarks and is unusable for regulatory
 guidance.
 
+What exists today, and what does not:
+
+| Set / script | Scope | Status |
+|---|---|---|
+| `eval/questions.yaml` + `run_eval.py` | Retrieval recall@k, MRR, rerank threshold sweep | Built; stops at reranking |
+| `eval/questions.yaml` + `run_answer_eval.py` | Full served path: answered, cited passage, language, refusals, judge rejections; `--judge off` baseline | Built |
+| `eval/attacks.yaml` + `run_answer_eval.py --set attacks` | Direct prompt injection, plus benign look-alikes that must be answered | Built |
+| Edition correctness, supersession | As in the table above | Not built — needs section detection fixed first |
+
 ---
 
 ## Known limitations
@@ -317,8 +401,13 @@ guidance.
   exchange for a retrieval path with no edition filter in it.
 - **Table extraction quality varies by edition.** Some recommendation tables still need
   manual verification after the QA gate passes.
-- **Uniform chunking.** Recommendation tables would likely benefit from a row-per-chunk
-  strategy distinct from prose, but this is not yet implemented.
+- **Section detection is weak.** Prose and tables are chunked by separate strategies, with a
+  table's header repeated when it splits, but a section heading is found for only about a
+  quarter of chunks. The section is the only evidence of which crop a table belongs to, so
+  neither the answering model nor the grounding judge can reliably reject an answer about
+  the wrong crop.
+- **Injection defence covers questions, not documents.** Instructions embedded in an
+  uploaded PDF are out of scope while only an administrator uploads official handbooks.
 - **Only full supersession is modelled.** A new edition covering a *subset* of an old one
   would require chunk-level rather than document-level archival. No such case exists in the
   current corpus, so it is deliberately unbuilt.

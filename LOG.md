@@ -189,3 +189,91 @@ it had not -- the errors are all at *fixture setup*, before any test body
 runs, and that is the tell. A stack trace that ends inside
 `testcontainers/core/docker_client.py` is never about the code under test.
 Worth remembering before debugging the wrong file for an hour.
+
+### Bug: The guard was declared regression-free by an eval that never ran it
+
+**Status:** Fixed
+**Date:** 2026-09-14
+**Cause:** After merging the grounding judge, `eval/run_eval.py` was run and its
+numbers (recall@5 28/29, refusal 1/5) matched the pre-guard baseline, and that
+was reported as "guard added, no regression". But `run_eval.py` calls
+`retrieve()` and `rerank()` and stops: it never calls `answer()`, the model or
+the judge. Matching the baseline was guaranteed and said nothing about the
+guard. Caught on a second look at what the script imports, not by any test.
+
+**Solution:** `eval/run_answer_eval.py`, which calls `answer()` itself with the
+real chat and judge wrapped to count calls and record verdicts, plus
+`--judge off` (an approve-everything judge) so the guard's effect is the
+difference between two runs. First real result: 27/29 answered, 27/27 cite
+the expected passage, 0 correct answers refused by the judge.
+
+**Tried and rejected:** trusting the number because it "looked right" -- a
+metric that cannot move when the thing under test changes is not measuring it.
+Before quoting any eval number, check which functions the script reaches.
+
+### Bug: A mutation restore silently changed the file it restored
+
+**Status:** Fixed
+**Date:** 2026-09-14
+**Cause:** The auth mutation script saved `app/main.py` with
+`Path.read_text()` and restored it with `Path.write_text()` in a `finally`.
+On Windows, `write_text` translates `\n` to `\r\n`, so the restored file
+differed from the original at byte 73 even though every line read the same.
+`cmp` against a `cp` backup is what exposed it; the test run on the restored
+file passed, which would have hidden it.
+
+A related failure earlier the same day, on the judge-prompt mutation: the
+script's own post-write sanity assert failed (it compared against a string
+whose backslash-continuation did not match the source), so it was not
+provable that the mutation applied, even though the expected tests went red.
+The result was not counted until the mutation was re-run with a check
+against the loaded constant and a printout of the mutated rule.
+
+**Solution:** restore with `cp` from the byte backup, then `cmp`, every time.
+Treat a mutation whose application is not proven as not run.
+
+**Tried and rejected:** relying on "tests pass after restore" as proof of
+restore -- line endings, and anything else invisible to the tests, survive it.
+
+### Bug: Every smoke-test request returned 400 "There was an error parsing the body"
+
+**Status:** Fixed (test harness, not the app)
+**Date:** 2026-09-14
+**Cause:** The curl smoke test passed Thai JSON inline (`-d '{"question": "..."}'`)
+from Git Bash on Windows. The arguments were re-encoded on the way to curl,
+so the server received bytes that were not valid UTF-8 JSON. Even the
+no-key request got 400 instead of 401, which was the tell that the request
+never reached auth: FastAPI parses the body before running dependencies.
+
+**Solution:** write the bodies to files as UTF-8 from Python and send them
+with `--data-binary @file`. Then: 401 x3 with identical bodies, 200 with a
+citation, 429 with `Retry-After` on the 11th request.
+
+**Tried and rejected:** suspecting the new auth code. A 400 on a request that
+should have been a 401 cannot be caused by the auth dependency, because the
+dependency never ran. Noted as a real (minor) property: a malformed body gets
+a 400 before any key check.
+
+### Bug: q09 refused by the judge after rule 5 was added -- looked like an over-strict rule
+
+**Status:** Fixed (not a bug in the rule)
+**Date:** 2026-09-14
+**Cause:** The first gold-set run with judge rule 5 refused q09 (soybean rust)
+with `FF`, and the judge said "not grounded" 4 times against 1 in the run
+before. The eval did not store the rejected answer or the judge's
+`unsupported` list, so the two runs differed in several things at once and
+could not be compared.
+
+**Solution:** held the answer fixed and varied only the judge prompt: three
+fresh q09 answers, each sent to the judge with the old instructions and with
+the new ones. 6/6 "grounded", identical verdicts. The refusal was judge
+nondeterminism, not rule 5.
+
+**Tried and rejected, on the way:** `load_dotenv()` with no path from a script
+on stdin (`find_dotenv` asserts on the frame); a run that hung after DNS
+failed mid-way (`getaddrinfo failed`) with the OpenAI client retrying
+silently; output buffered to a file and looking hung (fixed with
+`python -u`); the script in the scratchpad unable to import `query` (fixed
+with `PYTHONPATH=.`). None of those were about the question -- each cost a
+round trip, and the diagnosis itself was one clean run once they were out of
+the way.
