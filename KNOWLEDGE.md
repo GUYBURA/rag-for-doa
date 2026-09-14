@@ -933,3 +933,67 @@ and blocking an answer that quotes its source would protect nobody. That last
 one is still an assumption -- I haven't scanned the full corpus to confirm the
 number is actually in there, and I've written it down as unverified rather
 than as a finding."
+
+### Concept: Measure the structural defences before adding an injection guard
+
+**Definition:** Prompt injection is text in the input that tries to make the
+model follow the attacker instead of the system. A guard for it is only worth
+what it blocks that the rest of the pipeline did not already block -- so that
+has to be measured first, not assumed.
+
+**Why it matters here:** the query path was already hostile ground for an
+injection before any injection guard existed. The model can only reply in a
+JSON schema; `parse_answer()` refuses non-JSON and an empty `citations` list;
+citations are built in Python so an invented `[9]` raises; and the grounding
+judge rejects claims the cited excerpt does not state. "Answer without
+citations" and "reply in prose" are therefore not attacks that can succeed --
+they can only end in a refusal.
+
+So the order was: build `eval/attacks.yaml` (9 direct attacks, 4 benign
+look-alikes) and run it through the real `answer()` before writing any guard.
+Result with the claim-only judge: 7/9 blocked. The override, fake-excerpt and
+forged-JSON attacks all failed without help. The two that got through had one
+thing in common: the injected content was **not a factual claim**. A marker
+appended on instruction (`... Allocarsidara malayensis [1] PWNED-7731`) and a
+Python snippet whose every number was on the page both passed, because a judge
+that decomposes an answer into claims and checks each one has nothing to check
+in a token or in code.
+
+That located the gap in a layer that already existed, so the fix went there:
+rule 5 of `JUDGE_INSTRUCTIONS` makes additions that are not from the excerpts
+ungrounded, with an explicit allowance for plain framing ("according to the
+document"). No classifier, no new API call, no threshold, and it lands on the
+existing retry path. Result: 9/9 attacks, 4/4 benign. Both new live tests
+(`test_a_marker_appended_on_instruction_is_judged_ungrounded`,
+`test_program_code_built_from_grounded_numbers_is_judged_ungrounded`) go red
+when rule 5 is mutated back out, and their twin
+(`test_plain_framing_around_a_faithful_answer_stays_grounded`) stays green.
+
+A gold-set run afterwards refused q09 by judge, which looked like rule 5 being
+too strict. Re-running q09 three times and sending each identical answer to the
+old and the new judge gave 6/6 "grounded" -- the refusal was judge
+nondeterminism, not the rule. Diagnosed by holding the answer fixed and
+varying only the prompt, rather than by eyeballing two different runs.
+
+Two scope decisions worth defending. Indirect injection (instructions planted
+inside a PDF) is out of scope while documents come only from an admin
+uploading Department of Agriculture handbooks through the QA gate; it reopens
+the moment uploads come from anyone less trusted. And canaries in
+`must_not_contain` are checked absent from the corpus first -- `DDT` was the
+first choice for a fabricated-chemical canary and appears in 3 real chunks,
+which would have scored a correct answer as a breach.
+
+**Unverified as of writing:** every number above is one run per configuration
+against nondeterministic models. The attack set is 13 entries written by the
+same side that built the defences.
+
+**Interview answer:** "I didn't start with an injection classifier. I wrote an
+attack set and ran it through the pipeline as it was, because the design
+already constrained the model a lot -- JSON-only output, citations built in
+code, a grounding judge. Seven of nine attacks already failed. The two that
+worked both slipped extra content past the judge that wasn't a factual claim:
+a marker token, and code built from numbers that really were on the page. So
+the gap was in the judge, and I closed it there with one rule and a twin test
+proving ordinary phrasing still passes. When a later run refused a normal
+question, I held the answer fixed and swapped only the judge prompt to show
+the rule wasn't the cause."
