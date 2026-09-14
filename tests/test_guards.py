@@ -19,6 +19,7 @@ import pytest
 
 from query.guards import (
     ANSWER_PII_KINDS,
+    INPUT_PII_KINDS,
     GroundingUndecided,
     NotGrounded,
     PIIDetected,
@@ -281,7 +282,7 @@ def test_a_year_and_a_page_number_are_not_a_phone_number():
 
 
 # ---------------------------------------------------------------------------
-# PII on the way out -- checks less than on the way in, on purpose
+# PII on the way out -- the same kinds as on the way in
 # ---------------------------------------------------------------------------
 
 
@@ -290,15 +291,16 @@ def test_an_id_card_number_in_an_answer_is_caught():
         check_answer_text(f"ติดต่อเจ้าของแปลง เลขบัตร {VALID_ID}")
 
 
-def test_a_department_phone_number_in_an_answer_is_allowed():
-    """The asymmetry, and the test that documents why it is not an oversight.
-
-    The handbooks print the department's own switchboard. That is public
-    information about an organisation, and refusing a correct answer because
-    it quoted the source's contact line would protect nobody.
+def test_a_phone_number_in_an_answer_is_caught():
+    """There used to be a carve-out here: phone numbers were allowed out, on
+    the assumption the handbooks print a department switchboard that a correct
+    answer might quote. A scan of all 519 active chunks with the thai_phone
+    pattern found none, so the carve-out protected no real answer and only
+    left a gap. The output check now matches the input check.
     """
-    check_answer_text("สอบถามเพิ่มเติม กรมวิชาการเกษตร โทร 02-579-0151")
-    assert "thai_phone" not in ANSWER_PII_KINDS
+    with pytest.raises(PIIDetected):
+        check_answer_text("สอบถามเพิ่มเติม กรมวิชาการเกษตร โทร 02-579-0151")
+    assert ANSWER_PII_KINDS == INPUT_PII_KINDS
 
 
 # ---------------------------------------------------------------------------

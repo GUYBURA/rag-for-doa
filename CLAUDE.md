@@ -259,9 +259,10 @@ full gold set through three candidates — see the constant's comment for the ta
   unreadable) is not, so it refuses immediately — fail closed.
 - **PII**: regex, not a model, so it runs before anything leaves the process.
   `check_question()` refuses before `retrieve()`; `check_answer_text()` checks the output.
-  A PII refusal uses `PII_REFUSAL_TEXT`, not `REFUSAL_TEXT`. `ANSWER_PII_KINDS` omits
-  phone numbers on an assumption the handbooks print contact lines — a scan of the 519
-  active 2568 chunks found none, so that carve-out is pending removal.
+  A PII refusal uses `PII_REFUSAL_TEXT`, not `REFUSAL_TEXT`. `ANSWER_PII_KINDS` equals
+  `INPUT_PII_KINDS`: phone numbers were once exempt on the way out on an assumption the
+  handbooks print contact lines, and a scan of the 519 active chunks found none, so the
+  exemption was removed. Re-scan before reintroducing it for a new edition.
 - **Prompt injection** (direct only): no separate classifier. Rule 5 of
   `JUDGE_INSTRUCTIONS` makes anything added that is not from the excerpts — a marker, code,
   a poem, a followed instruction — ungrounded, while plain framing stays allowed. Chosen by

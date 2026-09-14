@@ -1060,3 +1060,39 @@ outside my process. Auth runs before counting so garbage keys can't grow
 memory, and I proved each of those properties with a mutation -- except
 constant-time key comparison, which no test can observe, and I've documented
 that instead of pretending."
+
+### Concept: Resolving an assumption you wrote down
+
+**Definition:** An "Unverified as of writing" note is a debt with a stated
+condition for paying it off. Paying it means running the measurement and
+then doing what the note said the result would mean -- even when that is
+deleting the design it defended.
+
+**Why it matters here:** the entry "A checksum is how a PII regex stops
+eating its own corpus" (above) records that outbound PII checks exempted
+phone numbers, on the belief that the handbooks print a department
+switchboard, and says plainly that this was an assumption: if the full
+corpus has no phone-shaped strings, the carve-out buys nothing and should be
+narrowed. The scan was run with the exact `thai_phone` pattern the guard
+uses, over all 519 active chunks: zero matches. So `ANSWER_PII_KINDS` is now
+`INPUT_PII_KINDS`.
+
+The test that used to assert a department number was *allowed* in an answer
+was rewritten to assert it is *caught*, and went red against the old code
+(`DID NOT RAISE PIIDetected`) before the one-line change turned it green --
+the change is proven by a test that failed first, not just by one that
+passes.
+
+Scope of the measurement, stated so nobody over-reads it: 519 chunks is the
+active corpus, which is the only text an answer can be built from. The
+archived 2565 and 2566 volumes have no chunks to scan. A future edition could
+print a contact line; if it does, the answer is to re-scan and decide on the
+new number, not to restore the old assumption.
+
+**Interview answer:** "I'd designed an exception into my PII guard -- let
+phone numbers through on the way out, because I assumed the government
+handbooks print their department's number. I wrote down at the time that it
+was an assumption and what would disprove it. Later I scanned the whole
+active corpus with the guard's own regex and found no phone numbers at all,
+so the exception protected nothing and just left a gap. I flipped the test
+first so it failed against the old behaviour, then removed the exception."
