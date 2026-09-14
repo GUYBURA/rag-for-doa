@@ -1096,3 +1096,54 @@ was an assumption and what would disprove it. Later I scanned the whole
 active corpus with the guard's own regex and found no phone numbers at all,
 so the exception protected nothing and just left a gap. I flipped the test
 first so it failed against the old behaviour, then removed the exception."
+
+### Concept: Move the models before moving the infrastructure
+
+**Definition:** When a migration changes two independent things -- here, the
+model provider and the hosting -- doing them in one step makes any
+regression unattributable. Sequencing them so each step ends on a number
+already measured turns "it got worse" into "this step made it worse".
+
+**Why it matters here:** the planned Google Cloud deployment also moves the
+four models from OpenRouter to Vertex AI. Every model change invalidates
+something downstream, and the dependencies run in one direction:
+
+- **Embedding** changes which passages are retrieved. The model is pinned in
+  `document.embedding_model`, and `assert_model_matches_corpus()` refuses to
+  start against a corpus embedded differently, so a provider change -- even
+  to a model with the same name -- means re-embedding the whole corpus.
+  Whether the two providers' vectors actually agree is measured first
+  (cosine per pair on real Thai chunks); it is not assumed from the name.
+- **Reranker** scores those passages on its own scale, so `SCORE_THRESHOLD`
+  (0.42, calibrated on Voyage) carries no meaning for another model and must
+  be re-swept.
+- **Answer model** reads the reranked passages; it is judged on the same four
+  axes that picked glm-5.3-flash -- answered, grounded, Thai, refused when it
+  should -- because a stronger model that answers more eagerly is a
+  regression here.
+- **Judge** reads the answers, so it goes last, and it must be a different
+  model family from the answer model or self-preference bias returns.
+
+So the order is embedding, reranker, answer, judge, all against the local
+database where the baselines exist -- and only then Cloud SQL and Cloud Run,
+with known-good models. A useful side effect: the cloud database starts
+empty, so it is ingested once, already on the final embedding model.
+
+Two related scope decisions. Vertex AI is used for its model APIs only, not
+Agent Engine: this system is a fixed pipeline in which Python decides every
+step (retrieve, rerank, refuse, retry, cite), and an agent runtime would add a
+layer whose defining feature -- letting a model choose its next action -- is
+exactly what invariants 10 and 11 exclude. And Cloud SQL is used despite
+costing about as much as the whole monthly budget, because trial credit pays
+for it; the credit's expiry date is therefore a planned migration point (to a
+cheaper Postgres host, by changing `DATABASE_URL` and re-running the
+row-by-row hash comparison), not a surprise.
+
+**Interview answer:** "Deploying also meant switching model providers, and I
+refused to do both at once. Each model change breaks a specific downstream
+number -- a new embedding model means re-embedding, a new reranker means my
+calibrated threshold is meaningless -- so I sequenced them locally where I
+had baselines, one model per step, each gated on the eval. Only then did the
+infrastructure move, and the cloud database gets checked against the local
+one row by row by content hash. If something regresses, I know which step did
+it."

@@ -285,7 +285,33 @@ held server-side (a Vercel server route), never shipped to a browser.
 Before deploying: `max-instances=1`, `API_KEYS` and `OPENROUTER_API_KEY` from Secret
 Manager, an OpenRouter spending limit, and a GCP budget alert.
 
-Not written yet, so the command does not exist: `db/seed.sql`.
+Not written yet, so the command does not exist: `db/seed.sql`, `Dockerfile`.
+
+## Deployment (planned, not started)
+
+Target is Google Cloud; `ARCHITECTURE.md` § Deployment has the table. The order is fixed on
+purpose — change one variable at a time, and end each phase by matching a number already
+measured locally:
+
+1. Project, budget alert, region chosen by where the models are available, APIs enabled,
+   `gcloud auth application-default login`.
+2. Models to Vertex AI **locally**, one per step, each gated on eval: embedding (compare
+   vectors across providers first, then re-ingest — the model is pinned per document),
+   reranker (re-run `run_eval.py --sweep`; the 0.42 threshold does not carry over), answer
+   model (`run_answer_eval.py` gold + attacks), judge (different model family from the
+   answer model; live guard tests + attacks). Vertex model APIs only — not Agent Engine.
+3. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
+   through the Auth Proxy, ingest from a workstation, then compare `content_sha256` row by
+   row with local and confirm `assert_no_stale_chunks` is empty.
+4. Dockerfile + `.dockerignore` (never `.env`, `data/raw`, `.venv`); run the container
+   locally against Cloud SQL first.
+5. Cloud Run: `max-instances=1`, dedicated service account with only Vertex AI user, Cloud
+   SQL client and secret accessor, secrets from Secret Manager, fresh API keys.
+6. Verify the live URL (401/200/429), logs, cost, and a revision rollback.
+
+Known risk to test, not assume: Cloud Run reaches Cloud SQL over a unix socket, and
+`PGVectorStore` uses asyncpg while ingestion uses psycopg — the connection strings may have
+to differ. Also check Cloud SQL's connection limit against both pools.
 
 ## Conventions
 
@@ -346,3 +372,6 @@ Append only. Never rewrite or delete earlier entries.
 - Loosening the rerank threshold, grounding check, or QA gate.
 - Widening what LangChain owns beyond retrieval and prompting.
 - Anything that would make an answer citable to a page that doesn't contain the claim.
+- Moving any model to a different provider (e.g. OpenRouter → Vertex AI), even when the
+  model name is the same. Every downstream number has to be re-measured.
+- Creating any cloud resource that costs money, or changing its size or edition.

@@ -98,8 +98,12 @@ answer from them and say which ones each claim came from. If nothing scores high
 the model finds nothing in them that answers the question, the system refuses instead of
 answering.
 
-The diagram also shows the guard layer — input screening and a grounding check on the
-output — which is the next thing to be built, not something already running.
+Around that path sits a guard layer, and it is running, not planned. A request needs an API
+key and is rate-limited per key. A question carrying a Thai ID number, phone number or email
+is refused before anything is searched or sent to a model. Every answer is read by a second,
+different model that checks each claim against the excerpts it cites — including anything
+added that no excerpt says, which is what stops an instruction smuggled into a question from
+being carried out. An answer that fails is regenerated once, then refused.
 
 Full technical detail, schema, and design rationale: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
@@ -112,14 +116,19 @@ uv run pytest -m "not requires_source_pdfs"
 ```
 
 Ingesting the handbooks needs the PDFs, which are not in this repository. With them in
-`data/raw/` and an `OPENROUTER_API_KEY` in `.env`, the pipeline runs per document and the
-service starts with:
+`data/raw/`, and `OPENROUTER_API_KEY` plus `API_KEYS` (comma-separated, see `.example.env`)
+in `.env`, the pipeline runs per document and the service starts with:
 
 ```bash
 uv run uvicorn app.main:app --reload
 curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -H 'X-API-Key: <one of API_KEYS>' \
   -d '{"question": "โรคราสนิมในถั่วเหลืองเกิดจากเชื้อราอะไร"}'
 ```
+
+The service refuses to start with `API_KEYS` empty. On Windows, send Thai request bodies
+from a UTF-8 file (`--data-binary @body.json`) rather than inline: Git Bash re-encodes
+command-line arguments and the server receives invalid JSON.
 
 ## How it's evaluated
 
@@ -159,18 +168,38 @@ chunker's section detection fixed first — see Known gaps.
 Run it with `uv run python -m eval.run_eval`, or `--sweep` to re-derive the relevance
 threshold from the data.
 
+That script stops at reranking, so it cannot see the answering model or the guards. A
+second one, `uv run python -m eval.run_answer_eval`, runs the same questions through the
+whole served path. With the grounding judge on, 27 of 29 answerable questions are answered,
+all 27 cite the expected passage, and the judge wrongly refuses none of them. `--judge off`
+swaps in a judge that approves everything, so the guard's effect is a measured difference
+between two runs rather than a claim.
+
+Prompt injection is evaluated the same way, with `--set attacks` over 13 hand-written cases
+in `eval/attacks.yaml`: nine attacks (override the rules, leak the instructions, off-domain
+tasks dressed in pesticide vocabulary, instructions riding on a real question, a forged
+excerpt, a forged reply) and four real questions that merely *sound* like instructions,
+which must still be answered. Before any injection defence was written, the existing design
+already stopped 7 of 9. The two that got through both added something that was not a
+factual claim — a marker token, and code built from numbers that really were on the page —
+which a claim-by-claim judge has nothing to check. One added rule in the judge closed both:
+9 of 9 blocked, 4 of 4 real questions still answered. Each figure is one run against
+nondeterministic models, and the attacks were written by the same person who built the
+defences.
+
 ## Status
 
-End to end and answering questions, locally. Every stage landed with the tests that prove
-it before the next one started — 175 of them, 156 run in CI on every push including the
-ones that need a real Postgres with pgvector. The 19 CI skips are the ones that need the
-source PDFs (gitignored) or a live API key.
+End to end and answering questions, locally, behind authentication, a rate limit and the
+guard layer. Every stage landed with the tests that prove it before the next one started —
+225 of them, 199 run in CI on every push including the ones that need a real Postgres with
+pgvector. The 26 CI skips are the ones that need the source PDFs (gitignored) or a live
+API key.
 
 All three editions are ingested, 2568 is active, and the other two are archived with their
 passages removed from search and their records kept.
 
-Not deployed. The HTTP service has no authentication, no rate limit and no input guard
-until the guard layer exists, and it says so in its own module docstring.
+Not deployed yet. Deployment to Google Cloud is the next stage and is planned, not started —
+see Next.
 
 **Working**
 
@@ -188,10 +217,10 @@ until the guard layer exists, and it says so in its own module docstring.
   identical but hash differently, which quietly breaks deduplication. There is a test that
   fails if anyone reorders the steps.
 
-- **Parsing QA gate** — nine checks over the raw text: page numbering and page-count
+- **Parsing QA gate** — ten checks over the raw text: page numbering and page-count
   cross-check, blank-page ratio, thin pages, unmapped Thai PUA, symbol-font PUA, Thai
-  combining-mark ratio, presence of Thai at all, and presence of the hand-entered subject
-  scopes. Each check records what it measured and the threshold it was judged against, not
+  combining-mark ratio, presence of Thai at all, tables found, and presence of the
+  hand-entered subject scopes. Each check records what it measured and the threshold it was judged against, not
   just a pass or fail, because the reason is what has to survive in the database.
 
   The combining-mark floor is the interesting one. It counts Thai marks per Thai consonant,
@@ -245,14 +274,45 @@ until the guard layer exists, and it says so in its own module docstring.
   with an empty citation list, never a `404`: declining to answer is the behaviour this
   system exists to get right, not an error condition for clients to special-case.
 
+- **Grounding guard** — every answer is checked by a judge model from a different vendor
+  than the one that wrote it, shown only the excerpts the answer actually cited, so an
+  answer that cites one excerpt while quoting another cannot pass. Numbers must match
+  exactly, knowledge the judge has that the excerpts don't state does not count, and
+  anything added that no excerpt says is unsupported. A failed check is retried once and
+  then refused; a judge that is down refuses immediately rather than serving an unchecked
+  answer. The one test that matters most — the judge catching a dose changed from 20 to 40
+  — runs against the real model.
+
+- **Personal-data guard** — regular expressions, not a model, so the check runs before a
+  question leaves the process. Thai ID numbers are validated by their check digit, which
+  is what stops every ISBN in the corpus from looking like one. Phone numbers were once
+  allowed through in answers on the assumption the handbooks print contact numbers; a scan
+  of the whole active corpus found none, so the exemption was removed.
+
+- **Authentication and rate limiting** — an API key per caller, compared in constant time,
+  with the same response for a missing key and a wrong one. Each key gets 10 requests a
+  minute, counted in memory. That is correct only with one running instance, which is how
+  it will be deployed, and it deliberately has no daily cap: a serverless instance that
+  scales to zero loses its memory, so the real spending ceiling is a limit set at the model
+  provider.
+
 **Next**
 
-- **Guard layer** — PII and prompt-injection screening on the way in, and a grounding
-  check on the way out that verifies each cited excerpt actually supports the sentence
-  citing it. The 34 real answers the evaluation run produced are the input for designing
-  it; writing it earlier would have meant guessing at answer length, phrasing and citation
-  density.
-- **Deployment** — Cloud Run, behind the guard layer.
+- **Deployment to Google Cloud**, in phases that each end by matching a number already
+  measured locally:
+  1. Set up the project, a budget alert, and the region, chosen by where the models are
+     available.
+  2. Move the four models (embedding, reranker, answer, judge) to Vertex AI **locally
+     first**, one at a time, re-running the evaluation after each. Changing provider changes
+     every score, so the reranker threshold is re-derived rather than carried over.
+  3. Cloud SQL for PostgreSQL with pgvector, ingested from a workstation through the Cloud
+     SQL Auth Proxy, and checked row by row against the local database by content hash.
+  4. A container image for the query service, tested locally against the cloud database.
+  5. Cloud Run with a single instance, a dedicated least-privilege service account, and
+     secrets in Secret Manager.
+  6. Verification against the live URL, including a rollback drill.
+- Later: ingestion as a Cloud Run Job reading PDFs from Cloud Storage, a web frontend that
+  holds the API key server-side, and CI/CD.
 
 **Known gaps**
 
@@ -291,6 +351,18 @@ until the guard layer exists, and it says so in its own module docstring.
   directly, which today means a script or a test.
 - The gold set has no supersession or edition-correctness questions yet, for the reason in
   the evaluation section above.
+- The grounding judge cannot catch an answer about the wrong crop. Asked about a mango pest
+  on durian, the model can answer from the mango table and every claim checks out against
+  its excerpt. The crop is usually named only in the section heading, and most passages
+  have none, so this is the same gap as section detection above.
+- Prompt injection is defended against in questions only. Instructions planted inside an
+  uploaded PDF are out of scope while documents come solely from an administrator uploading
+  official handbooks; that changes the moment anyone less trusted can upload.
+- The rate limit's count lives in one process's memory and is only correct with a single
+  instance. Scaling out means moving it to a shared store.
+- FastAPI parses the request body before the API key dependency runs, so a malformed body
+  gets a `400` even without a key. It costs nothing and consumes no quota, but an
+  unauthenticated caller can see body-parsing errors.
 
 ## Disclaimer
 
