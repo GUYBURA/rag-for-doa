@@ -285,7 +285,23 @@ held server-side (a Vercel server route), never shipped to a browser.
 Before deploying: `max-instances=1`, `API_KEYS` and `OPENROUTER_API_KEY` from Secret
 Manager, an OpenRouter spending limit, and a GCP budget alert.
 
-Not written yet, so the command does not exist: `db/seed.sql`, `Dockerfile`.
+`Dockerfile` + `.dockerignore` exist and the image builds and serves locally:
+
+```bash
+docker build -t rag-for-doa:local .
+docker run --rm -p 8000:8080 -e API_KEYS=... -e DATABASE_URL=... rag-for-doa:local
+```
+
+Single stage on `python:3.14-slim-bookworm`, `uv` copied in as a binary and not used at
+runtime, `uv sync --frozen --no-dev` against the lockfile. `--workers 1` in `CMD` is
+correctness, not tuning — `app/main.py` counts the rate limit in process memory, and
+`max-instances=1` constrains instances, not processes. Anything that would need a second
+worker needs the counter moved to a shared store first.
+
+`.gitattributes` pins `Dockerfile` and `.dockerignore` to LF: a CRLF checkout on Windows
+breaks line continuations inside the container.
+
+Not written yet, so the command does not exist: `db/seed.sql`.
 
 ## Deployment (planned, not started)
 
@@ -298,8 +314,9 @@ measured locally:
 2. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
    through the Auth Proxy, ingest from a workstation, then compare `content_sha256` row by
    row with local and confirm `assert_no_stale_chunks` is empty.
-3. Dockerfile + `.dockerignore` (never `.env`, `data/raw`, `.venv`); run the container
-   locally against Cloud SQL first.
+3. ~~Dockerfile + `.dockerignore`~~ **done** — built and smoke-tested against a local
+   pgvector container (`/health` 200, `/ask` 401 unauthenticated, clean SIGTERM shutdown).
+   Still to do in this phase: run that same image against Cloud SQL.
 4. Cloud Run: `max-instances=1`, dedicated service account with only Cloud SQL client and
    secret accessor, secrets from Secret Manager (`OPENROUTER_API_KEY` included), fresh API
    keys.
