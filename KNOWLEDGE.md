@@ -1147,3 +1147,57 @@ had baselines, one model per step, each gated on the eval. Only then did the
 infrastructure move, and the cloud database gets checked against the local
 one row by row by content hash. If something regresses, I know which step did
 it."
+
+### Concept: The cheapest migration is the one you don't do
+
+**Definition:** A migration has two bills -- the running cost of the thing
+you move to, and the one-off cost of re-establishing every measurement the
+move invalidates. The second is invisible on a pricing page and is often the
+larger of the two. Comparing only the first is how a migration gets approved
+that nobody wanted.
+
+**Why it matters here:** the entry above sequences a move of all four models
+from OpenRouter to Vertex AI. That move is now cancelled, on cost. The models
+stay on OpenRouter and deployment is infrastructure only.
+
+The running-cost side: Vertex bills per call at its own rate, on a GCP
+account that is already carrying Cloud SQL (roughly the whole monthly budget,
+covered by trial credit) and Cloud Run. OpenRouter is pay-per-token behind a
+spending limit set in OpenRouter's own dashboard -- a hard ceiling that a GCP
+budget alert is not, because an alert notifies and does not stop anything.
+For a portfolio system answering a handful of questions a day, adding a
+second metered surface buys nothing.
+
+The one-off side is bigger, and it is exactly the list the previous entry
+enumerates. Cancelling the move keeps all of it: the corpus is not
+re-embedded (`document.embedding_model` stays valid and
+`assert_model_matches_corpus()` keeps passing), `SCORE_THRESHOLD` stays at
+the 0.42 that `run_eval.py --sweep` derived on Voyage, the gold-set table
+that chose `ANSWER_MODEL` still describes the model in production, and the
+judge's 9/9 on `eval/attacks.yaml` still describes the judge in production.
+Deployment is then a change with no behavioural component at all: same
+models, same prompts, different machine. The row-by-row `content_sha256`
+comparison against the local database becomes a true equality check rather
+than a baseline for a moved target.
+
+What it costs, stated rather than hidden: model calls leave GCP, so there is
+egress and some added latency on every query; the key authenticates as an API
+key in Secret Manager rather than the service account's own identity, so it
+is a credential that can leak rather than an IAM binding that cannot; and the
+system depends on a vendor outside the cloud it is deployed in. The
+`Chat` and `Scorer` protocols in `query/answer.py` and `query/rerank.py` mean
+this stays reversible -- the seam that was built for the Vertex move is still
+there, and re-deciding it later is a base_url and a key, plus the
+re-measurement that was the real reason not to.
+
+**Interview answer:** "I'd planned to move all four models to Vertex AI as
+the first phase of deploying to Google Cloud, and I cancelled it. Two
+reasons. Vertex bills per call on top of a GCP account already paying for
+Cloud SQL and Cloud Run, where OpenRouter is pay-per-token behind a hard
+spending limit -- and more importantly, the move would have invalidated every
+number I'd measured: the calibrated rerank threshold, the model comparison
+table, the corpus embeddings, the judge's attack results. Not moving keeps
+all of them, so the deploy has no behavioural change in it and the cloud
+database has to match the local one exactly. The cost is egress, latency and
+an API key instead of IAM. I kept the provider behind a protocol either way,
+so it stays a decision I can revisit."

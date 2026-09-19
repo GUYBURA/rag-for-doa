@@ -344,9 +344,9 @@ OpenRouter. The plan below is agreed, not built.
 |---|---|---|
 | Query API | Cloud Run service, `max-instances=1` | One instance is what makes the in-memory rate limit correct |
 | Database and vectors | Cloud SQL for PostgreSQL 17 + pgvector, Enterprise edition, smallest shared-core machine | Paid from trial credit; a move to a cheaper host is planned before it expires |
-| Embedding, reranking, answer, judge | Vertex AI model APIs | Not Vertex AI Agent Engine: this is a fixed pipeline where Python makes every decision, not an agent |
-| Secrets | Secret Manager | `API_KEYS`, `DATABASE_URL`; no model API key once models run on Vertex via the service account |
-| Identity | Dedicated service account: Vertex AI user, Cloud SQL client, secret accessor | Not the default compute account |
+| Embedding, reranking, answer, judge | Stay on OpenRouter | Vertex AI model APIs were the earlier plan; dropped on cost — a per-call Vertex bill on top of Cloud SQL and Cloud Run, against pay-per-token with a hard spending limit. Keeping OpenRouter also keeps every measured number |
+| Secrets | Secret Manager | `API_KEYS`, `DATABASE_URL`, `OPENROUTER_API_KEY` |
+| Identity | Dedicated service account: Cloud SQL client, secret accessor | Not the default compute account. No Vertex AI user — nothing calls Vertex |
 | Client auth | App-level API key, held server-side by a web frontend | Identity Platform deferred until there are end users |
 | Guardrails | In-app grounding judge + regex PII | Model Armor not evaluated |
 | Ingestion (first) | `ingest()` run from a workstation through the Cloud SQL Auth Proxy | Three volumes, run rarely |
@@ -354,13 +354,18 @@ OpenRouter. The plan below is agreed, not built.
 | Spend control | Budget alert + spending limit at the model provider + single instance | A budget alert notifies; it does not stop spending |
 | Observability | Cloud Logging | |
 
-**Order.** Models move to Vertex AI *locally* first, one at a time — embedding, reranker,
-answer model, judge — each gated on the existing evaluation, before any infrastructure moves.
-Changing provider and infrastructure together would make a regression impossible to
-attribute. Changing the embedding provider means re-embedding the corpus (the model is
-pinned per document), and changing the reranker invalidates the calibrated threshold. The
-cloud database is then ingested and checked against the local one by `content_sha256`, row
-by row, before the service is containerized and deployed.
+**Order.** Infrastructure only, one variable at a time: Cloud SQL, then the container, then
+Cloud Run. The models do not move, so the phase that used to come first — swapping each of
+the four to Vertex AI locally, gated on the evaluation — is gone, and with it the
+re-embedding of the corpus (the embedding model is pinned per document) and the
+re-derivation of the rerank threshold. That leaves the deploy with no behavioural change at
+all to attribute a regression to: the cloud database is ingested and checked against the
+local one by `content_sha256`, row by row, and the same answers must come back.
+
+What staying on OpenRouter costs: model calls leave GCP, so there is egress and added
+latency, and they authenticate with an API key held in Secret Manager rather than the
+service account's own identity. Both were judged cheaper than the Vertex bill and the
+re-measurement.
 
 Ingestion runs as a job rather than a service because it is bursty, long-running and
 tolerant of latency; the query path runs as a service because it is the opposite.
