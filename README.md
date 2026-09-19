@@ -303,7 +303,8 @@ see Next.
   1. Set up the project, a budget alert, and the region, chosen by database latency.
   2. Cloud SQL for PostgreSQL with pgvector, ingested from a workstation through the Cloud
      SQL Auth Proxy, and checked row by row against the local database by content hash.
-  3. A container image for the query service, tested locally against the cloud database.
+  3. A container image for the query service — **built**, and smoke-tested against a local
+     database; still to be run against the cloud one.
   4. Cloud Run with a single instance, a dedicated least-privilege service account, and
      secrets in Secret Manager.
   5. Verification against the live URL, including a rollback drill.

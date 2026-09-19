@@ -277,3 +277,39 @@ silently; output buffered to a file and looking hung (fixed with
 with `PYTHONPATH=.`). None of those were about the question -- each cost a
 round trip, and the diagnosis itself was one clean run once they were out of
 the way.
+
+### Bug: the container died at startup on a non-root user with no home
+
+**Status:** Fixed
+**Date:** 2026-09-19
+**Cause:** The first Dockerfile created its runtime user with
+`useradd --system --no-create-home`, deliberately: the process has no reason
+to write anywhere, `/app` stays root-owned, and a user with no writable
+directory is one less thing an exploit can use. The image built, and the
+container then died before serving a request:
+
+```
+PermissionError: [Errno 13] Permission denied: '/home/appuser'
+```
+
+`useradd` still records `/home/appuser` as the home without creating it, and
+`/home` belongs to root. pythainlp calls `os.makedirs` on
+`$HOME/pythainlp-data` at **import** time -- from `query/retrieve.py` through
+`pythainlp.util` to `pythainlp/corpus/__init__.py`, module level, not on first
+Thai input. So the failure is at startup, on every start, in a path that has
+nothing to do with Thai text yet.
+
+**Solution:** `--create-home`. The home directory is the one writable place
+the process gets; `/app` is still root-owned and read-only to it, which was
+the part of the original decision worth keeping.
+
+**Tried and rejected:** nothing else was attempted -- the trace named the
+directory and the cause outright. Recorded because the *reasoning* that
+produced the bug was sound and would be repeated otherwise: "a service user
+needs no home" is true of the service and false of the libraries it imports.
+
+The general lesson is the one that made building the image locally worth it at
+all. This would have deployed as a container that crash-loops on Cloud Run
+with a Python traceback in the logs and no request ever served -- diagnosable,
+but through a log console, on a paid instance, after a deploy. It cost one
+`docker run` to find here.
