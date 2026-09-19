@@ -1,0 +1,26 @@
+# Not just image size: everything here also invalidates the build cache when
+# it changes, and .git/ carries every secret the repo ever committed.
+.git/
+.github/
+.env
+.example.env
+.venv/
+
+# Source PDFs. Never in an image -- CLAUDE.md.
+data/
+
+# Local-only tooling and checks.
+tests/
+eval/
+docker-compose.yaml
+.pytest_cache/
+.ruff_cache/
+.claude/
+
+# Docs. Nothing at runtime reads them, and excluding them means editing
+# documentation does not bust the layer cache.
+*.md
+docs/
+
+# Host bytecode -- wrong Python, wrong platform.
+__pycache__/

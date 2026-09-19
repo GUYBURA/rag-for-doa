@@ -1,0 +1,5 @@
+# These are read inside Linux containers, where a CR at end of line breaks
+# line continuations and shell commands. Keep them LF whatever the checkout.
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.sh text eol=lf
