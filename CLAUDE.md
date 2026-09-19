@@ -293,21 +293,26 @@ Target is Google Cloud; `ARCHITECTURE.md` § Deployment has the table. The order
 purpose — change one variable at a time, and end each phase by matching a number already
 measured locally:
 
-1. Project, budget alert, region chosen by where the models are available, APIs enabled,
+1. Project, budget alert, region chosen by Cloud SQL latency, APIs enabled,
    `gcloud auth application-default login`.
-2. Models to Vertex AI **locally**, one per step, each gated on eval: embedding (compare
-   vectors across providers first, then re-ingest — the model is pinned per document),
-   reranker (re-run `run_eval.py --sweep`; the 0.42 threshold does not carry over), answer
-   model (`run_answer_eval.py` gold + attacks), judge (different model family from the
-   answer model; live guard tests + attacks). Vertex model APIs only — not Agent Engine.
-3. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
+2. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
    through the Auth Proxy, ingest from a workstation, then compare `content_sha256` row by
    row with local and confirm `assert_no_stale_chunks` is empty.
-4. Dockerfile + `.dockerignore` (never `.env`, `data/raw`, `.venv`); run the container
+3. Dockerfile + `.dockerignore` (never `.env`, `data/raw`, `.venv`); run the container
    locally against Cloud SQL first.
-5. Cloud Run: `max-instances=1`, dedicated service account with only Vertex AI user, Cloud
-   SQL client and secret accessor, secrets from Secret Manager, fresh API keys.
-6. Verify the live URL (401/200/429), logs, cost, and a revision rollback.
+4. Cloud Run: `max-instances=1`, dedicated service account with only Cloud SQL client and
+   secret accessor, secrets from Secret Manager (`OPENROUTER_API_KEY` included), fresh API
+   keys.
+5. Verify the live URL (401/200/429), logs, cost, and a revision rollback.
+
+**All four models stay on OpenRouter.** The earlier plan moved them to Vertex AI as its own
+phase; that was dropped on cost — Vertex bills its own per-call rate on top of a GCP bill
+that is already carrying Cloud SQL and Cloud Run, while OpenRouter is pay-per-token with a
+hard spending limit and no second infrastructure surface. Keeping them also deletes the
+riskiest phase of the deploy: every measured number (the 0.42 rerank threshold,
+`ANSWER_MODEL`'s gold-set table, the judge's attack results, the pinned per-document
+embedding model) carries over untouched, so no re-measurement and no re-embedding. The cost
+is egress off GCP, added latency, and an API key instead of IAM. See KNOWLEDGE.md.
 
 Known risk to test, not assume: Cloud Run reaches Cloud SQL over a unix socket, and
 `PGVectorStore` uses asyncpg while ingestion uses psycopg — the connection strings may have
@@ -372,6 +377,7 @@ Append only. Never rewrite or delete earlier entries.
 - Loosening the rerank threshold, grounding check, or QA gate.
 - Widening what LangChain owns beyond retrieval and prompting.
 - Anything that would make an answer citable to a page that doesn't contain the claim.
-- Moving any model to a different provider (e.g. OpenRouter → Vertex AI), even when the
-  model name is the same. Every downstream number has to be re-measured.
+- Moving any model to a different provider, even when the model name is the same. Every
+  downstream number has to be re-measured. All four models are on OpenRouter and stay
+  there; the Vertex AI migration that used to be deploy phase 2 was dropped on cost.
 - Creating any cloud resource that costs money, or changing its size or edition.

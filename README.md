@@ -300,17 +300,20 @@ see Next.
 
 - **Deployment to Google Cloud**, in phases that each end by matching a number already
   measured locally:
-  1. Set up the project, a budget alert, and the region, chosen by where the models are
-     available.
-  2. Move the four models (embedding, reranker, answer, judge) to Vertex AI **locally
-     first**, one at a time, re-running the evaluation after each. Changing provider changes
-     every score, so the reranker threshold is re-derived rather than carried over.
-  3. Cloud SQL for PostgreSQL with pgvector, ingested from a workstation through the Cloud
+  1. Set up the project, a budget alert, and the region, chosen by database latency.
+  2. Cloud SQL for PostgreSQL with pgvector, ingested from a workstation through the Cloud
      SQL Auth Proxy, and checked row by row against the local database by content hash.
-  4. A container image for the query service, tested locally against the cloud database.
-  5. Cloud Run with a single instance, a dedicated least-privilege service account, and
+  3. A container image for the query service, tested locally against the cloud database.
+  4. Cloud Run with a single instance, a dedicated least-privilege service account, and
      secrets in Secret Manager.
-  6. Verification against the live URL, including a rollback drill.
+  5. Verification against the live URL, including a rollback drill.
+
+  The four models (embedding, reranker, answer, judge) stay on OpenRouter. Moving them to
+  Vertex AI was the original first phase and was dropped on cost: Vertex adds a per-call
+  bill on top of one already paying for Cloud SQL and Cloud Run, where OpenRouter is
+  pay-per-token behind a hard spending limit. It also means no score is re-measured and the
+  corpus is not re-embedded, at the price of egress, a little latency, and an API key in
+  place of IAM.
 - Later: ingestion as a Cloud Run Job reading PDFs from Cloud Storage, a web frontend that
   holds the API key server-side, and CI/CD.
 
