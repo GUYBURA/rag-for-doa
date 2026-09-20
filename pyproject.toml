@@ -20,6 +20,9 @@ dependencies = [
   "sqlalchemy>=2.0.52",
   "pgvector>=0.3.6",
   "fastapi",
+  # FastAPI parses multipart through this; /admin/documents takes a PDF
+  # upload, and without it the route fails to build at import time.
+  "python-multipart>=0.0.20",
   "uvicorn[standard]",
   "pydantic",
   "tenacity",

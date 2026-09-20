@@ -1201,3 +1201,80 @@ all of them, so the deploy has no behavioural change in it and the cloud
 database has to match the local one exactly. The cost is egress, latency and
 an API key instead of IAM. I kept the provider behind a protocol either way,
 so it stays a decision I can revisit."
+
+### Concept: A handle the client can hold before the server has one
+
+**Definition:** An endpoint that accepts work and finishes it later has to
+hand back something the caller can ask about afterwards. The reflex is to
+return the row id -- but a row id only exists once the row does, and in an
+asynchronous design the row often cannot be written until the slow work the
+caller is not waiting for has already produced something.
+
+**Why it matters here:** `POST /admin/documents` returns `202` with the
+file's SHA-256, not a `document_id`. The `document` row carries `qa`, and
+`qa_gate` has no verdict until extraction has run -- which is the 40-second
+part of the job this endpoint exists to not block on. Returning an id would
+mean either waiting for extraction (defeating the point) or writing a row
+that violates the schema's own contract by having no `qa`.
+
+The hash is a better handle than a synthesized one would be. It identifies
+the bytes the caller just sent, `find_document_summary_by_hash()` already
+keys on it, and it is stable across the re-upload that re-ingesting a failed
+document requires -- so the poll URL a caller was given before a failure
+still works after the retry. A generated request id would need its own table,
+its own cleanup, and a mapping to the document that eventually appears.
+
+The gap it leaves is real and is answered from memory rather than papered
+over: between `202` and the first row there is nothing in the database to
+look up. `IngestSlot` keeps the in-flight hash, so the poll answers
+`in_progress` for exactly that window. If the process dies mid-ingest, the
+slot dies with it and the same poll becomes a truthful `404` instead of a
+promise no one is keeping.
+
+**Interview answer:** "The upload endpoint returns the file hash rather than
+a database id, because at the moment it replies there is no row yet -- the
+row has to carry the QA verdict, and producing that verdict is the slow work
+the caller isn't waiting for. The hash is something the client already has,
+it's what the lookup is keyed on anyway, and it survives a re-upload, so the
+same status URL keeps working across a retry. The window before the row
+exists is answered from the in-process slot that's already serialising
+ingestion, which also means a crash turns the answer into an honest 404
+rather than a permanent 'in progress'."
+
+### Concept: In-memory state that is correct because it is fragile
+
+**Definition:** Durable state is usually the safer default, and persisting a
+flag "so it survives a restart" sounds strictly better. It is not, when the
+flag describes something that *cannot* survive the restart. Then persistence
+turns a self-clearing condition into a permanent one, and the system's
+recovery path becomes a human deleting a row.
+
+**Why it matters here:** two flags in `app/main.py` are deliberately process
+memory. `FixedWindowLimiter` was the first. `IngestSlot` -- which admits one
+ingestion at a time and answers `503` otherwise -- is the second, and the
+argument is sharper.
+
+The durable alternative looks obvious: ask the database whether any document
+is still `pending`. It is wrong. Invariant 9 leaves a gate-failed document
+`pending` on purpose, and a crashed ingest leaves one too. Under that rule
+the first failure anywhere would make the system refuse every upload forever,
+including the re-upload that is the documented way to fix it. The in-memory
+flag cannot fail that way: it is held by the same process that is doing the
+work, so it is released by `finally` when the work ends and destroyed by the
+OS if the process does. Its lifetime is exactly the lifetime of the thing it
+describes.
+
+The cost is the same one the rate limiter already pays and the Dockerfile
+already encodes: correct only at one instance and one worker
+(`max-instances=1`, `--workers 1`). Raising either means moving both to a
+shared store, not raising a number.
+
+**Interview answer:** "Two pieces of state in the HTTP layer live in process
+memory, and the second one taught me the rule. A single-slot lock stops
+concurrent ingestion. The obvious durable version -- query the database for a
+pending document -- is actively wrong, because a failed ingest is *supposed*
+to leave a document pending, so one failure would lock out every future
+upload permanently, including the retry that fixes it. Memory is right
+because it dies with the process that owns the work. The trade is that it
+only holds with one instance and one worker, which is why that's pinned in
+the Dockerfile with a comment rather than left as a default."
