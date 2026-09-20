@@ -58,6 +58,40 @@ def find_document_by_hash(
     return ExistingDocument(*row) if row else None
 
 
+class DocumentSummary(NamedTuple):
+    """What an uploader needs to see about a document they submitted.
+
+    `qa` is carried whole and not summarized: it is the record of which gate
+    check failed, and a document sitting at 'pending' with no explanation is
+    the one state the admin surface exists to make legible.
+    """
+
+    document_id: uuid.UUID
+    status: str
+    qa: dict
+    chunk_count: int | None
+
+
+def find_document_summary_by_hash(
+    conn: psycopg.Connection, file_hash: str
+) -> DocumentSummary | None:
+    """Progress for one uploaded file, keyed by its hash rather than by
+    document_id: the uploader has the bytes before a document row exists,
+    because the row cannot be written until qa_gate has run.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT document_id, status, qa, chunk_count
+            FROM   document
+            WHERE  file_hash = %s
+            """,
+            (file_hash,),
+        )
+        row = cur.fetchone()
+    return DocumentSummary(*row) if row else None
+
+
 def insert_pending_document(
     conn: psycopg.Connection,
     *,

@@ -271,6 +271,22 @@ full gold set through three candidates — see the constant's comment for the ta
   scope while only an admin uploads DOA handbooks (KNOWLEDGE.md). Rewording rule 5 or the
   `INSTRUCTIONS` rules quoted as canaries in `attacks.yaml` means re-running both sets.
 
+`POST /admin/documents` is the upload surface — multipart (`file`, `title_th`,
+`edition_year_be`, `scopes`), `X-Admin-Key` against `ADMIN_API_KEYS`, which is a **separate
+set from `API_KEYS`** and checked at startup the same way. It is transport only: it
+validates the form, builds the `DocumentMeta` (invariant 1 — the form is the only source),
+and hands off. The pipeline is unchanged.
+
+Ingestion runs in a `BackgroundTasks` handoff, so the reply is `202` with the **file hash**,
+not a document id: the `document` row carries `qa` and cannot exist until `qa_gate` has run.
+`GET /admin/documents/{file_hash}` polls it and returns `qa` whole — `in_progress` while the
+slot holds that hash and no row exists yet, `404` after. `IngestSlot` admits one ingestion
+at a time (`503` + `Retry-After` otherwise); a duplicate is `409`, an unknown scope or blank
+title `422`, and over `MAX_UPLOAD_BYTES` `413`. The slot is memory, not a DB query, because
+one crashed ingest leaves a document `pending` forever and a DB-based check would then
+refuse every upload for good. Re-uploading a `pending` document is the recovery path
+`ingest()` already implements (invariant 3).
+
 `POST /ask` requires an `X-API-Key` header matching one of the comma-separated `API_KEYS`
 (401 otherwise, same body for missing and wrong; `/health` is open). The app refuses to
 start with `API_KEYS` empty. Each key gets 10 requests per fixed 60 s window, counted in
@@ -282,8 +298,9 @@ no daily cap in the app on purpose — scale-to-zero wipes memory — so the mon
 the OpenRouter key's spending limit, set in OpenRouter, not in code. The key must only be
 held server-side (a Vercel server route), never shipped to a browser.
 
-Before deploying: `max-instances=1`, `API_KEYS` and `OPENROUTER_API_KEY` from Secret
-Manager, an OpenRouter spending limit, and a GCP budget alert.
+Before deploying: `max-instances=1`, `API_KEYS`, `ADMIN_API_KEYS` and
+`OPENROUTER_API_KEY` from Secret Manager, an OpenRouter spending limit, and a GCP budget
+alert.
 
 `Dockerfile` + `.dockerignore` exist and the image builds and serves locally:
 
