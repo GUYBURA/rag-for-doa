@@ -11,6 +11,7 @@ a test can assert on what the background function did without waiting.
 
 import io
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,7 +25,9 @@ from app.main import (
     get_document_lookup,
     get_ingest_slot,
     get_ingester,
+    get_object_store,
 )
+from app.storage import LocalObjectStore, document_name, new_upload_name
 from ingest.db import DocumentSummary
 
 ADMIN_KEY = "admin-key-0123456789abcdefghij"
@@ -47,17 +50,27 @@ def _pdf(size: int = 1024) -> dict:
     return {"file": ("2568.pdf", io.BytesIO(b"%PDF-1.7" + b"0" * size), "application/pdf")}
 
 
+PASSING_QA = {"page_count": {"passed": True, "measured": 423, "threshold": None}}
+FAILING_QA = {"page_count": {"passed": False, "measured": 0, "threshold": 423}}
+
+
 class FakeIngester:
-    """Records the call instead of running the pipeline."""
+    """Records the call instead of running the pipeline.
+
+    Returns a qa record because that is what ingest() returns and what
+    decides whether the original is archived.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.raises: Exception | None = None
+        self.qa: dict = PASSING_QA
 
-    def __call__(self, pdf_path: str, meta) -> None:
+    def __call__(self, pdf_path: str, meta) -> dict:
         self.calls.append((pdf_path, meta))
         if self.raises is not None:
             raise self.raises
+        return self.qa
 
 
 @pytest.fixture
@@ -77,12 +90,21 @@ def slot():
 
 
 @pytest.fixture
-def client(ingester, lookup, slot):
+def store(tmp_path):
+    """The real LocalObjectStore, not a mock: it is cheap, and the archive
+    step is only meaningful if something actually lands on disk.
+    """
+    return LocalObjectStore(tmp_path)
+
+
+@pytest.fixture
+def client(ingester, lookup, slot, store):
     app.dependency_overrides[get_admin_api_keys] = lambda: frozenset({ADMIN_KEY})
     app.dependency_overrides[get_api_keys] = lambda: frozenset({ASK_KEY})
     app.dependency_overrides[get_ingester] = lambda: ingester
     app.dependency_overrides[get_document_lookup] = lambda: lookup.get
     app.dependency_overrides[get_ingest_slot] = lambda: slot
+    app.dependency_overrides[get_object_store] = lambda: store
     # Not a context manager, for the reason test_app.py gives: that is what
     # runs the lifespan handler, which wants a database this test has not got.
     # Background tasks still run inside the request, so the handoff is
@@ -325,3 +347,187 @@ def test_the_admin_keys_come_from_their_own_environment_variable(monkeypatch):
 
     assert app_main.get_admin_api_keys() == frozenset({ADMIN_KEY})
     assert app_main.get_api_keys() == frozenset({ASK_KEY})
+
+
+# ---------------------------------------------------------------------------
+# The signed-URL route: POST /admin/uploads, then POST /admin/documents with
+# an object name instead of a body.
+# ---------------------------------------------------------------------------
+
+
+def _put_object(store, content: bytes = b"%PDF-1.7 big") -> str:
+    """Stand in for the browser's PUT to the signed URL."""
+    name = new_upload_name()
+    path = store._path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return name
+
+
+def _post_object(client, object_name, **overrides):
+    data = {**FORM, "object_name": object_name, "source": "2568.pdf", **overrides}
+    return client.post(
+        "/admin/documents", headers={"X-Admin-Key": ADMIN_KEY}, data=data
+    )
+
+
+def test_an_upload_url_is_issued_for_the_staging_prefix(client):
+    response = client.post("/admin/uploads", headers={"X-Admin-Key": ADMIN_KEY})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["object_name"].startswith("uploads/")
+    assert body["object_name"] in body["url"]
+    assert body["expires_in"] > 0
+
+
+def test_an_upload_url_needs_the_admin_key(client):
+    assert client.post("/admin/uploads").status_code == 401
+
+
+def test_two_upload_urls_name_different_objects(client):
+    headers = {"X-Admin-Key": ADMIN_KEY}
+    first = client.post("/admin/uploads", headers=headers).json()
+    second = client.post("/admin/uploads", headers=headers).json()
+
+    assert first["object_name"] != second["object_name"]
+
+
+def test_an_uploaded_object_is_ingested(client, ingester, store):
+    name = _put_object(store)
+
+    response = _post_object(client, name)
+
+    assert response.status_code == 202
+    assert len(ingester.calls) == 1
+    _, meta = ingester.calls[0]
+    assert meta.source == "2568.pdf"
+
+
+def test_the_object_bytes_reach_the_pipeline(client, ingester, store):
+    """The temp file handed to ingest() must be the object's content, not an
+    empty placeholder -- the download is the only thing that puts it there.
+    """
+    recorded = {}
+
+    def capture(pdf_path, meta):
+        recorded["bytes"] = Path(pdf_path).read_bytes()
+        return PASSING_QA
+
+    name = _put_object(store, b"%PDF-1.7 distinctive")
+    app.dependency_overrides[get_ingester] = lambda: capture
+
+    _post_object(client, name)
+
+    assert recorded["bytes"] == b"%PDF-1.7 distinctive"
+
+
+def test_sending_both_a_file_and_an_object_name_is_refused(client, ingester, store):
+    name = _put_object(store)
+
+    response = client.post(
+        "/admin/documents",
+        headers={"X-Admin-Key": ADMIN_KEY},
+        data={**FORM, "object_name": name, "source": "2568.pdf"},
+        files=_pdf(),
+    )
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
+def test_sending_neither_is_refused(client, ingester):
+    response = client.post(
+        "/admin/documents", headers={"X-Admin-Key": ADMIN_KEY}, data=FORM
+    )
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
+def test_a_document_path_cannot_be_claimed_as_an_upload(client, ingester, store):
+    """The attack the staging prefix exists to stop: naming the permanent
+    object of a live edition and having the service ingest it -- and then
+    overwrite it as its own source.
+    """
+    permanent = document_name("a" * 64)
+    path = store._path(permanent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"%PDF-1.7 the real 2568")
+
+    response = _post_object(client, permanent)
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
+def test_an_object_that_does_not_exist_is_404(client, ingester):
+    response = _post_object(client, new_upload_name())
+
+    assert response.status_code == 404
+    assert ingester.calls == []
+
+
+def test_an_object_over_the_ceiling_is_refused_without_downloading(
+    client, ingester, store, monkeypatch
+):
+    monkeypatch.setattr(app_main, "MAX_OBJECT_BYTES", 8)
+    name = _put_object(store, b"%PDF-1.7 more than eight bytes")
+
+    response = _post_object(client, name)
+
+    assert response.status_code == 413
+    assert ingester.calls == []
+
+
+def test_an_object_name_without_a_source_is_refused(client, ingester, store):
+    """document.source is display and half of the uniqueness key; a uuid
+    there would make two editions of one volume look unrelated.
+    """
+    name = _put_object(store)
+
+    response = _post_object(client, name, source="")
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Archiving the original
+# ---------------------------------------------------------------------------
+
+
+def test_a_passing_ingest_archives_the_object(client, store):
+    name = _put_object(store, b"%PDF-1.7 keep me")
+
+    file_hash = _post_object(client, name).json()["file_hash"]
+
+    archived = store._path(document_name(file_hash))
+    assert archived.read_bytes() == b"%PDF-1.7 keep me"
+    # Never a move: the lifecycle rule owns the staging prefix.
+    assert store._path(name).exists()
+
+
+def test_a_passing_multipart_ingest_archives_the_body(client, store):
+    """Small volumes get an original in the bucket too. invariant 3 draws no
+    line between the two routes.
+    """
+    file_hash = _post(client).json()["file_hash"]
+
+    assert store._path(document_name(file_hash)).is_file()
+
+
+def test_a_failing_ingest_archives_nothing(client, ingester, store):
+    ingester.qa = FAILING_QA
+
+    file_hash = _post(client).json()["file_hash"]
+
+    assert not store._path(document_name(file_hash)).exists()
+
+
+def test_a_raising_ingest_archives_nothing(client, ingester, store):
+    ingester.raises = RuntimeError("embedding provider is down")
+
+    file_hash = _post(client).json()["file_hash"]
+
+    assert not store._path(document_name(file_hash)).exists()

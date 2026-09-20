@@ -48,6 +48,10 @@ query/
                    # app/main.py either.
 app/
   main.py          # FastAPI / Cloud Run service. HTTP only — no business logic.
+  storage.py       # object store seam: signed upload URLs, the uploads/ and
+                   # documents/ prefixes, and the local stand-in. Here and
+                   # not in ingest/ because ingest() takes a path and must
+                   # never learn a bucket exists.
 eval/
   questions.yaml   # gold set
   run_eval.py
@@ -276,6 +280,24 @@ full gold set through three candidates — see the constant's comment for the ta
 set from `API_KEYS`** and checked at startup the same way. It is transport only: it
 validates the form, builds the `DocumentMeta` (invariant 1 — the form is the only source),
 and hands off. The pipeline is unchanged.
+
+Files above Cloud Run's 32 MiB body limit take the second route: `POST /admin/uploads`
+returns a signed URL plus an `uploads/<uuid>.pdf` object name, the client PUTs the bytes
+straight to the bucket, and `POST /admin/documents` is then called with `object_name` and
+`source` instead of `file`. One endpoint, not two, because everything after the bytes reach
+a local path is identical. The object name is checked with `is_upload_name()` before it
+reaches storage — an allowlist, because a caller naming a path in `documents/` could
+otherwise have the service ingest and then overwrite the source PDF of a live edition. Size
+is read from the object's metadata before any download (`413`), a missing object is `404`.
+
+After a passing ingest the original is archived at `documents/<file_hash>.pdf` — by
+`copy()` for the signed-URL route (server-side, the object is already there) and by
+`upload_from()` for the multipart one. A failing ingest archives nothing; those bytes are
+not the source of anything, and the staging prefix's lifecycle rule removes them. The path
+is derived from `file_hash`, so no column stores it (invariant 6).
+
+`GcsObjectStore` does not exist yet: `LocalObjectStore` backs both routes until there is a
+GCP project. Nothing above the `ObjectStore` protocol changes when it lands.
 
 Ingestion runs in a `BackgroundTasks` handoff, so the reply is `202` with the **file hash**,
 not a document id: the `document` row carries `qa` and cannot exist until `qa_gate` has run.
