@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from dotenv import load_dotenv
@@ -33,7 +34,16 @@ from fastapi import (
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, StringConstraints
 
+from app.storage import (
+    SIGNED_URL_TTL_SECONDS,
+    LocalObjectStore,
+    ObjectStore,
+    document_name,
+    is_upload_name,
+    new_upload_name,
+)
 from ingest.db import DocumentSummary, find_document_summary_by_hash
+from ingest.qa_gate import failed_checks
 from ingest.run import DocumentMeta, file_hash256
 from ingest.run import ingest as ingest_document
 from query.answer import answer as answer_question
@@ -41,7 +51,7 @@ from query.prompt import Answer
 from query.retrieve import make_store
 
 Answerer = Callable[[str], Answer]
-Ingester = Callable[[str, DocumentMeta], None]
+Ingester = Callable[[str, DocumentMeta], dict]
 DocumentLookup = Callable[[str], DocumentSummary | None]
 
 RATE_LIMIT_PER_WINDOW = 10
@@ -53,6 +63,15 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 # through a signed URL instead (ARCHITECTURE.md), which is why this is a
 # ceiling and not the whole answer.
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
+# The ceiling for the signed-URL route, which Cloud Run never sees. Higher,
+# but not unbounded: it is read from the object's metadata before anything is
+# downloaded, so a refusal costs one metadata call rather than the transfer.
+MAX_OBJECT_BYTES = 512 * 1024 * 1024
+
+# Where LocalObjectStore keeps its objects. Replaced by a bucket when
+# GcsObjectStore lands; the endpoint does not change.
+OBJECT_STORE_ROOT = os.environ.get("OBJECT_STORE_ROOT", "data/objects")
 
 # The schema's own CHECK on document.scopes. Repeated here so a bad value is
 # a 422 naming the field rather than a constraint violation inside a
@@ -179,6 +198,10 @@ async def lifespan(app: FastAPI) -> Iterator[None]:
     # holds a connection for minutes, and Cloud SQL's smallest tier has few to
     # give. IngestSlot caps the long-lived holders at one, so the rest of this
     # pool stays available to /ask.
+    # Local today; a GcsObjectStore swaps in here and nothing above the seam
+    # changes. Created in lifespan rather than at import so a test's store can
+    # be injected without the module having made a directory first.
+    app.state.object_store = LocalObjectStore(Path(OBJECT_STORE_ROOT))
     with ConnectionPool(dsn, min_size=2, max_size=4) as pool:
         app.state.pool = pool
         yield
@@ -214,6 +237,10 @@ def get_limiter(request: Request) -> FixedWindowLimiter:
 
 def get_ingest_slot(request: Request) -> IngestSlot:
     return request.app.state.ingest_slot
+
+
+def get_object_store(request: Request) -> ObjectStore:
+    return request.app.state.object_store
 
 
 def require_api_key(
@@ -387,6 +414,19 @@ class UploadAccepted(BaseModel):
     status: str
 
 
+class UploadUrlOut(BaseModel):
+    """Where to PUT the bytes, and the name to quote back afterwards.
+
+    The name is issued here rather than accepted from the client for the
+    reason KNOWLEDGE.md gives: whoever holds the URL writes to the path it
+    was signed for, so the service has to be the one that picks it.
+    """
+
+    object_name: str
+    url: str
+    expires_in: int
+
+
 class DocumentStatusOut(BaseModel):
     file_hash: str
     status: str
@@ -416,8 +456,54 @@ def _save_upload(upload: UploadFile) -> str:
     return path
 
 
+def _fetch_object(
+    store: ObjectStore, object_name: str, source: str | None
+) -> tuple[str, str]:
+    """Bring an already-uploaded object down to a temp path.
+
+    The name comes from the client, so it is checked before it reaches
+    storage: it must be one this service issued into the staging prefix.
+    Without that, a caller could name a path in documents/ and have the
+    service ingest -- and later overwrite -- the source PDF of a live
+    edition.
+
+    Size is read from the object's metadata first. Refusing after the
+    download would mean paying for the transfer of the thing being refused.
+    """
+    if not is_upload_name(object_name):
+        raise HTTPException(status_code=422, detail="not an upload object name")
+
+    size = store.size(object_name)
+    if size is None:
+        raise HTTPException(status_code=404, detail="no such object")
+    if size > MAX_OBJECT_BYTES:
+        raise HTTPException(
+            status_code=413, detail=f"object exceeds {MAX_OBJECT_BYTES} bytes"
+        )
+
+    # The object name is a uuid, so the human-meaningful filename has to come
+    # from the form. document.source is display and uniqueness -- (edition,
+    # source) -- and a uuid in that column would make two editions of the same
+    # volume look unrelated.
+    if not source:
+        raise HTTPException(
+            status_code=422, detail="source is required with object_name"
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        path = tmp.name
+    store.download_to(object_name, path)
+    return path, source
+
+
 def _ingest_in_background(
-    ingester: Ingester, slot: IngestSlot, pdf_path: str, meta: DocumentMeta
+    ingester: Ingester,
+    slot: IngestSlot,
+    store: ObjectStore,
+    pdf_path: str,
+    meta: DocumentMeta,
+    file_hash: str,
+    object_name: str | None,
 ) -> None:
     """Runs on Starlette's threadpool after the 202 has been sent.
 
@@ -426,9 +512,26 @@ def _ingest_in_background(
     held and the temp file on disk for the life of the process. What the
     uploader sees instead is the document staying 'pending' with its qa
     record, which is the same signal a gate failure gives (invariant 9).
+
+    A passing ingest archives the original at documents/<file_hash>.pdf --
+    invariant 3 wants re-ingestion from the source to be verifiable, and a
+    file_hash on a permanent row proves nothing if the bytes it names are
+    gone. A failing one archives nothing: those bytes are not a source of
+    anything, and the staging prefix's lifecycle rule removes them.
+
+    Which call does the archiving depends on where the bytes came from. The
+    signed-URL route already has the object in the bucket, so it copies
+    server-side; the multipart route only ever had a request body, so it
+    uploads the temp file.
     """
     try:
-        ingester(pdf_path, meta)
+        qa = ingester(pdf_path, meta)
+        if not failed_checks(qa):
+            destination = document_name(file_hash)
+            if object_name is None:
+                store.upload_from(pdf_path, destination)
+            else:
+                store.copy(object_name, destination)
     except Exception:
         log.exception("ingestion failed for %s", meta.source)
     finally:
@@ -437,6 +540,27 @@ def _ingest_in_background(
             os.unlink(pdf_path)
         except OSError:
             log.warning("could not remove temp upload %s", pdf_path)
+
+
+@app.post("/admin/uploads", status_code=201)
+def create_upload(
+    _: Annotated[str, Depends(require_admin_key)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+) -> UploadUrlOut:
+    """Issue a one-shot URL for a file too large to post through here.
+
+    No metadata is taken: title, edition and scopes reach the pipeline on the
+    POST that claims the object, because a document row cannot be written
+    until qa_gate has run anyway. This endpoint therefore stores nothing --
+    an unclaimed object is removed by the bucket's lifecycle rule rather than
+    by a record kept here.
+    """
+    object_name = new_upload_name()
+    return UploadUrlOut(
+        object_name=object_name,
+        url=store.signed_upload_url(object_name),
+        expires_in=SIGNED_URL_TTL_SECONDS,
+    )
 
 
 @app.post("/admin/documents", status_code=202)
@@ -451,9 +575,18 @@ def upload_document(
     ],
     edition_year_be: Annotated[int, Form()],
     scopes: Annotated[list[str], Form(min_length=1)],
-    file: Annotated[UploadFile, File()],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+    file: Annotated[UploadFile | None, File()] = None,
+    object_name: Annotated[str | None, Form()] = None,
+    source: Annotated[str | None, Form()] = None,
 ) -> UploadAccepted:
     """Accept one handbook and ingest it in the background.
+
+    Two routes in, one handler: `file` for a body Cloud Run will carry, or
+    `object_name` for one already uploaded through a signed URL. One endpoint
+    rather than two because everything after the bytes reach a local path --
+    auth, the slot, the duplicate check, the handoff -- is identical, and two
+    handlers would be two chances for those to drift apart.
 
     Everything here is transport: validating the form, turning it into the
     DocumentMeta that ingest() has always taken (invariant 1 -- no stage
@@ -464,7 +597,17 @@ def upload_document(
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown scopes: {unknown}")
 
-    path = _save_upload(file)
+    if (file is None) == (object_name is None):
+        raise HTTPException(
+            status_code=422, detail="send exactly one of file or object_name"
+        )
+
+    if file is not None:
+        path = _save_upload(file)
+        filename = file.filename or "upload.pdf"
+    else:
+        path, filename = _fetch_object(store, object_name, source)
+
     file_hash = file_hash256(path)
 
     # ingest() checks this itself and is the authority; this is the same check
@@ -489,12 +632,21 @@ def upload_document(
         )
 
     meta = DocumentMeta(
-        source=file.filename or "upload.pdf",
+        source=filename,
         title_th=title_th,
         edition_year_be=edition_year_be,
         scopes=list(scopes),
     )
-    background.add_task(_ingest_in_background, ingester, slot, path, meta)
+    background.add_task(
+        _ingest_in_background,
+        ingester,
+        slot,
+        store,
+        path,
+        meta,
+        file_hash,
+        object_name,
+    )
     return UploadAccepted(file_hash=file_hash, status="accepted")
 
 
