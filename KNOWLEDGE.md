@@ -1278,3 +1278,109 @@ upload permanently, including the retry that fixes it. Memory is right
 because it dies with the process that owns the work. The trade is that it
 only holds with one instance and one worker, which is why that's pinned in
 the Dockerfile with a comment rather than left as a default."
+
+### Concept: A staging area exists to hold what has not been checked yet
+
+**Definition:** When a client writes a file somewhere the server will later
+trust, the write and the trust must happen in different places. The upload
+lands in a staging area that guarantees nothing; only after the server has
+inspected the bytes does anything move to the area whose contents are
+treated as authoritative. Skipping the staging step means the client, not
+the server, decides what the authoritative area contains.
+
+**Why it matters here:** files larger than Cloud Run's request limit upload
+straight to Cloud Storage, so the bytes never pass through code that could
+vet them on the way in. The bucket therefore has two prefixes:
+
+```
+uploads/<uuid>.pdf          unvetted, lifecycle-deleted after one day
+documents/<file_hash>.pdf   the verified source, permanent
+```
+
+Ingestion itself runs from neither: the object is downloaded to a temp file,
+`ingest()` works on that path exactly as it does for a multipart upload, and
+only a successful run copies the object to `documents/`.
+
+Three reasons the single-prefix version is wrong, in order of severity:
+
+- **The client names the object.** The URL has to be signed before anyone has
+  seen the file, so whoever holds it writes to a path chosen in advance. Let
+  that path be in `documents/` and the holder can overwrite the source PDF of
+  an edition that is already active -- destroying the artifact invariant 3
+  exists to preserve. The whole point of keeping `file_hash` on a permanent
+  `document` row is that re-ingesting the original proves the same result;
+  that proof dies if the original can be swapped.
+- **Only the server can compute the right name.** `documents/<file_hash>.pdf`
+  is content-addressed, and the hash is known only after the bytes arrive.
+  The copy from `uploads/` is not an extra step; it is the step that gives
+  the file its real name.
+- **Rubbish would land where nothing can delete it.** Abandoned uploads,
+  non-PDFs and gate failures all need clearing, and a GCS lifecycle rule can
+  match a prefix, an age or a storage class -- never "was this one claimed?".
+  Separating the prefixes makes the rule expressible, which is why the
+  staging area needs no cleanup code at all.
+
+The one-day lifetime is not an argument against the staging area; it is what
+the staging area buys. And because the permanent path is derivable from a
+column that already exists, no column is added to store it (invariant 6).
+
+**Interview answer:** "Big files upload straight to Cloud Storage with a
+signed URL, so they never pass through my service on the way in. That means
+the URL has to be signed before anyone has seen the file, and whoever holds
+it picks the path. If that path were the permanent area, the holder could
+overwrite the source PDF of an edition that's already live -- which is the
+artifact my whole audit story depends on. So uploads land in a staging prefix
+that guarantees nothing, the server downloads and hashes them, and only a
+successful ingest copies the file to a content-addressed permanent path.
+Staging gets a one-day lifecycle rule, so abandoned junk deletes itself
+instead of needing a cleanup job."
+
+### Concept: Signed URLs, and signing without holding a key
+
+**Definition:** A signed URL is a normal storage URL carrying a signature,
+an expiry and a fixed method and path. Anyone holding it can perform exactly
+that one operation until it expires, with no credentials of their own. It
+moves bytes off the application's critical path: the client talks to the
+storage service directly, and the application only ever handles the small
+request that asks for the URL and the small one that claims the result.
+
+**Why it matters here:** Cloud Run rejects a request body over 32 MiB before
+it reaches the process, and some volumes in this corpus are larger. Raising
+a limit in code cannot fix that -- the platform, not the application, is
+refusing. A signed URL sidesteps the limit by removing Cloud Run from the
+transfer entirely, which also means an upload no longer occupies the single
+instance that `/ask` shares.
+
+**Signing without a key file.** Signing normally needs a service account's
+private key, and a private key in a container is a credential that can leak,
+has to be rotated, and survives being copied. The alternative is the IAM
+Credentials API: the service account asks Google to sign on its behalf
+(`signBlob`), authenticating with the identity Cloud Run already gives it.
+Nothing is stored, nothing is rotated, and the permission to do it is an IAM
+binding (`roles/iam.serviceAccountTokenCreator` on itself) that can be
+audited and revoked centrally. That fits the least-privilege service account
+ARCHITECTURE.md already specifies -- Cloud SQL client, secret accessor, and
+now object admin scoped to one bucket.
+
+**What a signed URL cannot do, and the trade taken.** A plain signed PUT
+carries no size limit: the holder may upload anything until the URL expires.
+The only real prevention is signing a required `x-goog-content-length-range`
+header, which the client must then reproduce byte-exactly or the upload is
+refused -- a failure mode that is hard to debug from a browser. The choice
+here is to check the object's size from its metadata *before* downloading it,
+and refuse with 413 then. That pays for a short-lived junk object, which the
+staging prefix's lifecycle rule removes anyway. It is the right trade for a
+surface only an admin reaches a few times a year, and the wrong one for a
+public upload endpoint -- recorded because the reasoning, not the conclusion,
+is what transfers.
+
+**Interview answer:** "Cloud Run caps request bodies at 32 MiB and some of
+these handbooks are bigger, so the browser uploads straight to Cloud Storage
+with a signed URL and my service only handles the request that issues it and
+the one that claims the object. Two details I'd defend. I sign through the
+IAM signBlob API rather than a service account key file, so there's no
+private key in the container to leak or rotate -- just an IAM binding. And a
+signed PUT can't enforce a size limit unless you sign a content-length-range
+header the client has to match exactly; I chose instead to read the object's
+size before downloading and refuse there, because the staging prefix already
+expires junk after a day. For a public endpoint I'd make the opposite call."
