@@ -596,3 +596,32 @@ def test_a_bucket_and_signer_email_in_the_environment_build_the_gcs_store(
         "bucket": "agricultural_manual",
         "signer_email": "ingest@rag-for-doa.iam.gserviceaccount.com",
     }
+
+
+def test_the_real_ingester_hands_the_qa_record_back(monkeypatch):
+    """Every other test swaps in a fake that returns qa, which is exactly how
+    the real closure came to drop it and archiving silently never ran. This
+    one goes through get_ingester() itself, with only ingest() replaced.
+    """
+    qa = {"page_count": {"passed": True, "measured": 4, "threshold": 4}}
+
+    class _Pool:
+        def connection(self):
+            return self
+
+        def __enter__(self):
+            return "conn"
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Request:
+        class app:
+            class state:
+                pool = _Pool()
+
+    monkeypatch.setattr(app_main, "ingest_document", lambda conn, path, meta: qa)
+
+    run = app_main.get_ingester(_Request())
+
+    assert run("x.pdf", None) is qa

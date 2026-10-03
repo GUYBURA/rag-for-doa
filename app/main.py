@@ -353,9 +353,9 @@ def get_ingester(request: Request) -> Ingester:
     would have been handed back to the pool.
     """
 
-    def run(pdf_path: str, meta: DocumentMeta) -> None:
+    def run(pdf_path: str, meta: DocumentMeta) -> dict:
         with request.app.state.pool.connection() as conn:
-            ingest_document(conn, pdf_path, meta)
+            return ingest_document(conn, pdf_path, meta)
 
     return run
 
