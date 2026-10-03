@@ -217,11 +217,9 @@ def test_signing_goes_through_iam_when_a_signer_email_is_configured():
         valid = True
         token = "ya29.fake"
 
-    class _Client:
-        _credentials = _Credentials()
-
     store = GcsObjectStore.__new__(GcsObjectStore)
-    store._client = _Client()
+    store._client = None
+    store._signing_credentials = _Credentials()
     store._signer_email = "ingest@rag-for-doa.iam.gserviceaccount.com"
     store._bucket = _RecordingBucket({})
 
@@ -237,3 +235,48 @@ def test_without_a_signer_email_nothing_about_iam_is_sent(recording_store):
 
     assert "service_account_email" not in recording_store._bucket.recorded
     assert "access_token" not in recording_store._bucket.recorded
+
+
+def test_signing_credentials_ask_for_the_cloud_platform_scope(monkeypatch):
+    """The bug only a real Cloud Run revision showed: signBlob rejects the
+    storage-scoped token storage.Client() carries (ACCESS_TOKEN_SCOPE_INSUFFICIENT),
+    while a developer's own ADC is broad enough to hide it. So the scope asked
+    for is asserted here, since no test can reach the IAM API itself.
+    """
+    asked: dict = {}
+
+    class _Credentials:
+        valid = True
+        token = "ya29.fake"
+
+    def fake_default(scopes=None):
+        asked["scopes"] = scopes
+        return _Credentials(), "test-project"
+
+    class _Client:
+        def bucket(self, name):
+            return _RecordingBucket({})
+
+    monkeypatch.setattr("app.storage.google.auth.default", fake_default)
+
+    store = GcsObjectStore(
+        BUCKET,
+        client=_Client(),
+        signer_email="ingest@rag-for-doa.iam.gserviceaccount.com",
+    )
+
+    assert asked["scopes"] == ["https://www.googleapis.com/auth/cloud-platform"]
+    assert store._signing_kwargs()["access_token"] == "ya29.fake"
+
+
+def test_without_a_signer_email_no_signing_credentials_are_looked_up(monkeypatch):
+    def fail(scopes=None):
+        raise AssertionError("google.auth.default must not be called")
+
+    class _Client:
+        def bucket(self, name):
+            return _RecordingBucket({})
+
+    monkeypatch.setattr("app.storage.google.auth.default", fail)
+
+    GcsObjectStore(BUCKET, client=_Client())
