@@ -91,6 +91,22 @@ ALLOWED_SCOPES = frozenset({"fungicide", "insecticide", "herbicide"})
 log = logging.getLogger(__name__)
 
 
+def parse_scopes(raw: list[str]) -> list[str]:
+    """Form values to a scope list. Accepts a repeated field and/or commas.
+
+    Swagger UI and curl one-liners send "fungicide,insecticide" as one value,
+    while a script repeats the field; both mean the same thing. Order is kept
+    and duplicates dropped, so the stored array is what the human typed.
+    """
+    seen: dict[str, None] = {}
+    for value in raw:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                seen.setdefault(part)
+    return list(seen)
+
+
 def parse_api_keys(raw: str) -> frozenset[str]:
     """API_KEYS is comma-separated. Blank entries are dropped, not kept: a
     trailing comma would otherwise configure "" as a key, and a request with
@@ -617,6 +633,9 @@ def upload_document(
     infers this from the PDF), deciding whether to admit the request, and
     handing off. The pipeline itself is untouched.
     """
+    scopes = parse_scopes(scopes)
+    if not scopes:
+        raise HTTPException(status_code=422, detail="scopes must not be empty")
     unknown = sorted(set(scopes) - ALLOWED_SCOPES)
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown scopes: {unknown}")
@@ -659,7 +678,7 @@ def upload_document(
         source=filename,
         title_th=title_th,
         edition_year_be=edition_year_be,
-        scopes=list(scopes),
+        scopes=scopes,
     )
     background.add_task(
         _ingest_in_background,

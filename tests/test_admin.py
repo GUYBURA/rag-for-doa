@@ -197,6 +197,24 @@ def test_empty_scopes_are_refused(client, ingester):
     assert ingester.calls == []
 
 
+def test_scopes_may_arrive_comma_separated_in_one_field(client, ingester):
+    """What Swagger UI and a curl one-liner send: one value, commas inside."""
+    response = _post(
+        client, data={**FORM, "scopes": " fungicide , insecticide,,fungicide "}
+    )
+
+    assert response.status_code == 202
+    _, meta = ingester.calls[0]
+    assert meta.scopes == ["fungicide", "insecticide"]
+
+
+def test_scopes_of_only_blanks_and_commas_are_refused(client, ingester):
+    response = _post(client, data={**FORM, "scopes": " , ,"})
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
 def test_a_blank_title_is_refused(client, ingester):
     response = _post(client, data={**FORM, "title_th": "  "})
 
