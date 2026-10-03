@@ -354,9 +354,14 @@ measured locally:
 
 1. Project, budget alert, region chosen by Cloud SQL latency, APIs enabled,
    `gcloud auth application-default login`.
-2. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
-   through the Auth Proxy, ingest from a workstation, then compare `content_sha256` row by
-   row with local and confirm `assert_no_stale_chunks` is empty.
+2. ~~Cloud SQL~~ **done** — `rag-for-doa:asia-southeast1:document-storage` (Enterprise,
+   PG17, `db-f1-micro`, zonal, 10 GB SSD, public IP with no authorized networks), database
+   `doa`. Migration via `psql` through the Auth Proxy (a downloaded binary: winget has no
+   package), corpus ingested from a workstation. Compared with the local database: 519
+   chunks, `content_sha256`, content, embeddings and metadata identical row for row, 2565 and
+   2566 archived, 2568 active, `assert_no_stale_chunks` empty on both. Only difference: Cloud
+   SQL has pgvector 0.8.5, local 0.8.6. It was first created as `db-custom-2-8192`
+   (about 10x the cost) and patched down; check the tier of anything created in the console.
 3. ~~Dockerfile + `.dockerignore`~~ **done** — built and smoke-tested against a local
    pgvector container (`/health` 200, `/ask` 401 unauthenticated, clean SIGTERM shutdown).
    Still to do in this phase: run that same image against Cloud SQL.
