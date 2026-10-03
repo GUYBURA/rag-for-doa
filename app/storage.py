@@ -26,8 +26,15 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
+import google.auth
 import google.auth.transport.requests
 from google.cloud import storage
+
+# The IAM Credentials API accepts only this scope (or iam). Not the storage
+# scopes storage.Client() asks for: on Cloud Run that token is rejected with
+# ACCESS_TOKEN_SCOPE_INSUFFICIENT, and a developer's ADC hides the problem
+# locally because user credentials are already broad.
+_SIGNING_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 UPLOAD_PREFIX = "uploads/"
 DOCUMENT_PREFIX = "documents/"
@@ -220,6 +227,11 @@ class GcsObjectStore:
         self._client = client or storage.Client()
         self._bucket = self._client.bucket(bucket_name)
         self._signer_email = signer_email
+        # Separate from the client's credentials on purpose: those are scoped
+        # for storage, and widening them would widen every bucket call.
+        self._signing_credentials = (
+            google.auth.default(scopes=_SIGNING_SCOPES)[0] if signer_email else None
+        )
 
     def _signing_kwargs(self) -> dict:
         """What generate_signed_url needs to sign without a private key.
@@ -231,7 +243,7 @@ class GcsObjectStore:
         """
         if self._signer_email is None:
             return {}
-        credentials = self._client._credentials
+        credentials = self._signing_credentials
         if not credentials.valid:
             credentials.refresh(google.auth.transport.requests.Request())
         return {
