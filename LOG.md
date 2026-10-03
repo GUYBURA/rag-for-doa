@@ -337,3 +337,18 @@ cap and the flag is the character-count heuristic flipping on answers full of
 Latin scientific names, not a language change. A full baseline run without the
 cap was abandoned when the eval's own `_read_verdict` crashed on a judge reply
 with `None` content (a harness gap, not a production path).
+
+### Bug: grounding judge is the remaining /ask latency (deepseek-v4-flash-0731)
+**Status:** Open
+**Date:** 2026-10-03
+**Cause:** After capping the answer model, live `/ask` for the thrips question
+still took 68-78 s. The answer call is now ~10 s; the judge call, same prompt
+shape, took 5 s to 344 s (8951 reasoning tokens in the worst one). The OpenAI
+client's `timeout=45` did not bound it: httpx timeouts are per read, not total,
+and the SDK retries internally, so a "45 s" call ran 80 s.
+**Tried and rejected:** `reasoning: {effort: "low"}` -- reasoning tokens 195,
+3678, 710 across three calls, so it is not enforced for this model.
+`reasoning: {max_tokens: 800}` -- 1790, 1206, 1501, 2119 reasoning tokens, 37-59 s,
+not honoured either. A top-level `max_tokens` would truncate the JSON and turn
+into GroundingUndecided, i.e. a refusal. Not shipped: changing the judge's
+model or settings means re-running eval/attacks.yaml and the gold set.
