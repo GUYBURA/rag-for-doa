@@ -557,7 +557,7 @@ def test_a_raising_ingest_archives_nothing(client, ingester, store):
 
 
 def test_without_a_bucket_the_filesystem_store_is_used(monkeypatch):
-    monkeypatch.setattr(app_main, "GCS_BUCKET", "")
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
 
     assert isinstance(app_main.build_object_store(), LocalObjectStore)
 
@@ -567,8 +567,32 @@ def test_a_bucket_without_a_signer_email_fails_at_startup(monkeypatch):
     look for a private key in the process -- the thing the IAM signing path
     exists to avoid.
     """
-    monkeypatch.setattr(app_main, "GCS_BUCKET", "agricultural_manual")
-    monkeypatch.setattr(app_main, "GCS_SIGNER_EMAIL", "")
+    monkeypatch.setenv("GCS_BUCKET", "agricultural_manual")
+    monkeypatch.delenv("GCS_SIGNER_EMAIL", raising=False)
 
     with pytest.raises(RuntimeError, match="GCS_SIGNER_EMAIL"):
         app_main.build_object_store()
+
+
+def test_a_bucket_and_signer_email_in_the_environment_build_the_gcs_store(
+    monkeypatch,
+):
+    """Read at call time, so a value that arrives after import -- from
+    load_dotenv() in lifespan -- is seen. Reading it into a constant at
+    import froze it empty and silently chose the filesystem store.
+    """
+    created = {}
+
+    class _Spy:
+        def __init__(self, bucket, signer_email):
+            created.update(bucket=bucket, signer_email=signer_email)
+
+    monkeypatch.setattr(app_main, "GcsObjectStore", _Spy)
+    monkeypatch.setenv("GCS_BUCKET", "agricultural_manual")
+    monkeypatch.setenv("GCS_SIGNER_EMAIL", "ingest@rag-for-doa.iam.gserviceaccount.com")
+
+    assert isinstance(app_main.build_object_store(), _Spy)
+    assert created == {
+        "bucket": "agricultural_manual",
+        "signer_email": "ingest@rag-for-doa.iam.gserviceaccount.com",
+    }

@@ -70,19 +70,6 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 # downloaded, so a refusal costs one metadata call rather than the transfer.
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 
-# Which object store backs the upload routes. A bucket name switches to GCS;
-# without one the filesystem stand-in is used, which is what keeps the test
-# suite and a local run free of credentials.
-GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
-
-# The service account signed URLs are signed as. Required with GCS_BUCKET
-# because signing happens through the IAM Credentials API, which has to be
-# told whose signature to produce -- see app/storage.py.
-GCS_SIGNER_EMAIL = os.environ.get("GCS_SIGNER_EMAIL", "")
-
-# Where LocalObjectStore keeps its objects when no bucket is configured.
-OBJECT_STORE_ROOT = os.environ.get("OBJECT_STORE_ROOT", "data/objects")
-
 # The schema's own CHECK on document.scopes. Repeated here so a bad value is
 # a 422 naming the field rather than a constraint violation inside a
 # background task nobody is watching.
@@ -201,16 +188,22 @@ class IngestSlot:
 def build_object_store() -> ObjectStore:
     """GCS when a bucket is configured, the filesystem otherwise.
 
+    Env is read here, not into module constants: load_dotenv() runs in
+    lifespan, after import, so a constant would be frozen before .env was
+    read and a local run would quietly use the filesystem store.
+
     The signer email is demanded alongside the bucket rather than defaulted:
     without it every signed URL would fall back to looking for a private key
     in the process, which is the thing this design exists to avoid, and the
     failure would appear at the first upload rather than at startup.
     """
-    if not GCS_BUCKET:
-        return LocalObjectStore(Path(OBJECT_STORE_ROOT))
-    if not GCS_SIGNER_EMAIL:
+    bucket = os.environ.get("GCS_BUCKET", "")
+    signer_email = os.environ.get("GCS_SIGNER_EMAIL", "")
+    if not bucket:
+        return LocalObjectStore(Path(os.environ.get("OBJECT_STORE_ROOT", "data/objects")))
+    if not signer_email:
         raise RuntimeError("GCS_BUCKET is set but GCS_SIGNER_EMAIL is not")
-    return GcsObjectStore(GCS_BUCKET, signer_email=GCS_SIGNER_EMAIL)
+    return GcsObjectStore(bucket, signer_email=signer_email)
 
 
 @asynccontextmanager
