@@ -197,6 +197,24 @@ def test_empty_scopes_are_refused(client, ingester):
     assert ingester.calls == []
 
 
+def test_scopes_may_arrive_comma_separated_in_one_field(client, ingester):
+    """What Swagger UI and a curl one-liner send: one value, commas inside."""
+    response = _post(
+        client, data={**FORM, "scopes": " fungicide , insecticide,,fungicide "}
+    )
+
+    assert response.status_code == 202
+    _, meta = ingester.calls[0]
+    assert meta.scopes == ["fungicide", "insecticide"]
+
+
+def test_scopes_of_only_blanks_and_commas_are_refused(client, ingester):
+    response = _post(client, data={**FORM, "scopes": " , ,"})
+
+    assert response.status_code == 422
+    assert ingester.calls == []
+
+
 def test_a_blank_title_is_refused(client, ingester):
     response = _post(client, data={**FORM, "title_th": "  "})
 
@@ -531,3 +549,79 @@ def test_a_raising_ingest_archives_nothing(client, ingester, store):
     file_hash = _post(client).json()["file_hash"]
 
     assert not store._path(document_name(file_hash)).exists()
+
+
+# ---------------------------------------------------------------------------
+# Which store the app builds
+# ---------------------------------------------------------------------------
+
+
+def test_without_a_bucket_the_filesystem_store_is_used(monkeypatch):
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
+
+    assert isinstance(app_main.build_object_store(), LocalObjectStore)
+
+
+def test_a_bucket_without_a_signer_email_fails_at_startup(monkeypatch):
+    """Not at the first upload. Without the email, signing would silently
+    look for a private key in the process -- the thing the IAM signing path
+    exists to avoid.
+    """
+    monkeypatch.setenv("GCS_BUCKET", "agricultural_manual")
+    monkeypatch.delenv("GCS_SIGNER_EMAIL", raising=False)
+
+    with pytest.raises(RuntimeError, match="GCS_SIGNER_EMAIL"):
+        app_main.build_object_store()
+
+
+def test_a_bucket_and_signer_email_in_the_environment_build_the_gcs_store(
+    monkeypatch,
+):
+    """Read at call time, so a value that arrives after import -- from
+    load_dotenv() in lifespan -- is seen. Reading it into a constant at
+    import froze it empty and silently chose the filesystem store.
+    """
+    created = {}
+
+    class _Spy:
+        def __init__(self, bucket, signer_email):
+            created.update(bucket=bucket, signer_email=signer_email)
+
+    monkeypatch.setattr(app_main, "GcsObjectStore", _Spy)
+    monkeypatch.setenv("GCS_BUCKET", "agricultural_manual")
+    monkeypatch.setenv("GCS_SIGNER_EMAIL", "ingest@rag-for-doa.iam.gserviceaccount.com")
+
+    assert isinstance(app_main.build_object_store(), _Spy)
+    assert created == {
+        "bucket": "agricultural_manual",
+        "signer_email": "ingest@rag-for-doa.iam.gserviceaccount.com",
+    }
+
+
+def test_the_real_ingester_hands_the_qa_record_back(monkeypatch):
+    """Every other test swaps in a fake that returns qa, which is exactly how
+    the real closure came to drop it and archiving silently never ran. This
+    one goes through get_ingester() itself, with only ingest() replaced.
+    """
+    qa = {"page_count": {"passed": True, "measured": 4, "threshold": 4}}
+
+    class _Pool:
+        def connection(self):
+            return self
+
+        def __enter__(self):
+            return "conn"
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Request:
+        class app:
+            class state:
+                pool = _Pool()
+
+    monkeypatch.setattr(app_main, "ingest_document", lambda conn, path, meta: qa)
+
+    run = app_main.get_ingester(_Request())
+
+    assert run("x.pdf", None) is qa

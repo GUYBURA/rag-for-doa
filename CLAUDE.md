@@ -296,8 +296,12 @@ After a passing ingest the original is archived at `documents/<file_hash>.pdf` â
 not the source of anything, and the staging prefix's lifecycle rule removes them. The path
 is derived from `file_hash`, so no column stores it (invariant 6).
 
-`GcsObjectStore` does not exist yet: `LocalObjectStore` backs both routes until there is a
-GCP project. Nothing above the `ObjectStore` protocol changes when it lands.
+`GcsObjectStore` is the real bucket; `LocalObjectStore` is the stand-in. `build_object_store()` in
+`app/main.py` picks by env: no `GCS_BUCKET` means local, a bucket without `GCS_SIGNER_EMAIL` refuses
+to start. Signing goes through IAM `signBlob` (service account email + access token), never a key
+file, so the runtime account needs Service Account Token Creator on itself. Its tests run against
+fake-gcs-server (Docker); the emulator does not check signatures, so signing is tested as
+parameters only.
 
 Ingestion runs in a `BackgroundTasks` handoff, so the reply is `202` with the **file hash**,
 not a document id: the `document` row carries `qa` and cannot exist until `qa_gate` has run.

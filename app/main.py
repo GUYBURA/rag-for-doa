@@ -36,6 +36,7 @@ from pydantic import BaseModel, StringConstraints
 
 from app.storage import (
     SIGNED_URL_TTL_SECONDS,
+    GcsObjectStore,
     LocalObjectStore,
     ObjectStore,
     document_name,
@@ -69,16 +70,28 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 # downloaded, so a refusal costs one metadata call rather than the transfer.
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 
-# Where LocalObjectStore keeps its objects. Replaced by a bucket when
-# GcsObjectStore lands; the endpoint does not change.
-OBJECT_STORE_ROOT = os.environ.get("OBJECT_STORE_ROOT", "data/objects")
-
 # The schema's own CHECK on document.scopes. Repeated here so a bad value is
 # a 422 naming the field rather than a constraint violation inside a
 # background task nobody is watching.
 ALLOWED_SCOPES = frozenset({"fungicide", "insecticide", "herbicide"})
 
 log = logging.getLogger(__name__)
+
+
+def parse_scopes(raw: list[str]) -> list[str]:
+    """Form values to a scope list. Accepts a repeated field and/or commas.
+
+    Swagger UI and curl one-liners send "fungicide,insecticide" as one value,
+    while a script repeats the field; both mean the same thing. Order is kept
+    and duplicates dropped, so the stored array is what the human typed.
+    """
+    seen: dict[str, None] = {}
+    for value in raw:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                seen.setdefault(part)
+    return list(seen)
 
 
 def parse_api_keys(raw: str) -> frozenset[str]:
@@ -172,6 +185,27 @@ class IngestSlot:
             return self._file_hash == file_hash
 
 
+def build_object_store() -> ObjectStore:
+    """GCS when a bucket is configured, the filesystem otherwise.
+
+    Env is read here, not into module constants: load_dotenv() runs in
+    lifespan, after import, so a constant would be frozen before .env was
+    read and a local run would quietly use the filesystem store.
+
+    The signer email is demanded alongside the bucket rather than defaulted:
+    without it every signed URL would fall back to looking for a private key
+    in the process, which is the thing this design exists to avoid, and the
+    failure would appear at the first upload rather than at startup.
+    """
+    bucket = os.environ.get("GCS_BUCKET", "")
+    signer_email = os.environ.get("GCS_SIGNER_EMAIL", "")
+    if not bucket:
+        return LocalObjectStore(Path(os.environ.get("OBJECT_STORE_ROOT", "data/objects")))
+    if not signer_email:
+        raise RuntimeError("GCS_BUCKET is set but GCS_SIGNER_EMAIL is not")
+    return GcsObjectStore(bucket, signer_email=signer_email)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Iterator[None]:
     """Build the store and the pool once.
@@ -198,10 +232,9 @@ async def lifespan(app: FastAPI) -> Iterator[None]:
     # holds a connection for minutes, and Cloud SQL's smallest tier has few to
     # give. IngestSlot caps the long-lived holders at one, so the rest of this
     # pool stays available to /ask.
-    # Local today; a GcsObjectStore swaps in here and nothing above the seam
-    # changes. Created in lifespan rather than at import so a test's store can
-    # be injected without the module having made a directory first.
-    app.state.object_store = LocalObjectStore(Path(OBJECT_STORE_ROOT))
+    # Created in lifespan rather than at import so a test's store can be
+    # injected without the module having built a client or made a directory.
+    app.state.object_store = build_object_store()
     with ConnectionPool(dsn, min_size=2, max_size=4) as pool:
         app.state.pool = pool
         yield
@@ -320,9 +353,9 @@ def get_ingester(request: Request) -> Ingester:
     would have been handed back to the pool.
     """
 
-    def run(pdf_path: str, meta: DocumentMeta) -> None:
+    def run(pdf_path: str, meta: DocumentMeta) -> dict:
         with request.app.state.pool.connection() as conn:
-            ingest_document(conn, pdf_path, meta)
+            return ingest_document(conn, pdf_path, meta)
 
     return run
 
@@ -593,6 +626,9 @@ def upload_document(
     infers this from the PDF), deciding whether to admit the request, and
     handing off. The pipeline itself is untouched.
     """
+    scopes = parse_scopes(scopes)
+    if not scopes:
+        raise HTTPException(status_code=422, detail="scopes must not be empty")
     unknown = sorted(set(scopes) - ALLOWED_SCOPES)
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown scopes: {unknown}")
@@ -635,7 +671,7 @@ def upload_document(
         source=filename,
         title_th=title_th,
         edition_year_be=edition_year_be,
-        scopes=list(scopes),
+        scopes=scopes,
     )
     background.add_task(
         _ingest_in_background,

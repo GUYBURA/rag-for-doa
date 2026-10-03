@@ -22,8 +22,12 @@ rather than to logic that was never exercised.
 import re
 import shutil
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
+
+import google.auth.transport.requests
+from google.cloud import storage
 
 UPLOAD_PREFIX = "uploads/"
 DOCUMENT_PREFIX = "documents/"
@@ -187,3 +191,76 @@ class LocalObjectStore:
         # slash in it -- but a filesystem needs the parent to exist first.
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
+
+
+class GcsObjectStore:
+    """The real bucket. Same four operations, same meanings.
+
+    Credentials are never passed in as a key file. In production the service
+    account's identity comes from the runtime, and signing goes through the
+    IAM Credentials API (`signBlob`) rather than a private key this process
+    holds -- see KNOWLEDGE.md. That path needs the account's own email, which
+    user credentials do not have, so it is supplied explicitly via
+    `signer_email` and is also what makes local signing work against a real
+    bucket by impersonating that account.
+
+    No content type is bound into the signature. A signed URL can constrain
+    headers, but every constraint is one the client has to reproduce exactly
+    or the upload fails with no useful message. What the bytes actually are
+    is settled by the QA gate after ingestion starts, which is a check this
+    system already trusts (invariant 9).
+    """
+
+    def __init__(
+        self,
+        bucket_name: str,
+        client: "storage.Client | None" = None,
+        signer_email: str | None = None,
+    ) -> None:
+        self._client = client or storage.Client()
+        self._bucket = self._client.bucket(bucket_name)
+        self._signer_email = signer_email
+
+    def _signing_kwargs(self) -> dict:
+        """What generate_signed_url needs to sign without a private key.
+
+        Passing a service account email and an access token makes the client
+        sign through the IAM Credentials API instead of locally. Omitting
+        them falls back to signing with whatever key the credentials carry,
+        which is the path the emulator and a key file take.
+        """
+        if self._signer_email is None:
+            return {}
+        credentials = self._client._credentials
+        if not credentials.valid:
+            credentials.refresh(google.auth.transport.requests.Request())
+        return {
+            "service_account_email": self._signer_email,
+            "access_token": credentials.token,
+        }
+
+    def signed_upload_url(self, object_name: str) -> str:
+        return self._bucket.blob(object_name).generate_signed_url(
+            version="v4",
+            method="PUT",
+            expiration=timedelta(seconds=SIGNED_URL_TTL_SECONDS),
+            **self._signing_kwargs(),
+        )
+
+    def size(self, object_name: str) -> int | None:
+        # get_blob() is the round trip that returns None for a missing
+        # object; bucket.blob() only builds a reference and would report
+        # size None for an object that exists but has not been reloaded.
+        blob = self._bucket.get_blob(object_name)
+        return None if blob is None else blob.size
+
+    def download_to(self, object_name: str, dest_path: str) -> None:
+        self._bucket.blob(object_name).download_to_filename(dest_path)
+
+    def upload_from(self, src_path: str, object_name: str) -> None:
+        self._bucket.blob(object_name).upload_from_filename(src_path)
+
+    def copy(self, src: str, dst: str) -> None:
+        # Server-side: the bytes never come back through this process, which
+        # is the whole reason the large-file route exists.
+        self._bucket.copy_blob(self._bucket.blob(src), self._bucket, dst)
