@@ -346,7 +346,7 @@ breaks line continuations inside the container.
 
 Not written yet, so the command does not exist: `db/seed.sql`.
 
-## Deployment (planned, not started)
+## Deployment (phases 1-5 done privately; public access pending)
 
 Target is Google Cloud; `ARCHITECTURE.md` § Deployment has the table. The order is fixed on
 purpose — change one variable at a time, and end each phase by matching a number already
@@ -354,16 +354,46 @@ measured locally:
 
 1. Project, budget alert, region chosen by Cloud SQL latency, APIs enabled,
    `gcloud auth application-default login`.
-2. Cloud SQL (Enterprise edition, smallest shared-core, PG17, no HA), migration via `psql`
-   through the Auth Proxy, ingest from a workstation, then compare `content_sha256` row by
-   row with local and confirm `assert_no_stale_chunks` is empty.
+2. ~~Cloud SQL~~ **done** — `rag-for-doa:asia-southeast1:document-storage` (Enterprise,
+   PG17, `db-f1-micro`, zonal, 10 GB SSD, public IP with no authorized networks), database
+   `doa`. Migration via `psql` through the Auth Proxy (a downloaded binary: winget has no
+   package), corpus ingested from a workstation. Compared with the local database: 519
+   chunks, `content_sha256`, content, embeddings and metadata identical row for row, 2565 and
+   2566 archived, 2568 active, `assert_no_stale_chunks` empty on both. Only difference: Cloud
+   SQL has pgvector 0.8.5, local 0.8.6. It was first created as `db-custom-2-8192`
+   (about 10x the cost) and patched down; check the tier of anything created in the console.
 3. ~~Dockerfile + `.dockerignore`~~ **done** — built and smoke-tested against a local
-   pgvector container (`/health` 200, `/ask` 401 unauthenticated, clean SIGTERM shutdown).
-   Still to do in this phase: run that same image against Cloud SQL.
-4. Cloud Run: `max-instances=1`, dedicated service account with only Cloud SQL client and
-   secret accessor, secrets from Secret Manager (`OPENROUTER_API_KEY` included), fresh API
-   keys.
-5. Verify the live URL (401/200/429), logs, cost, and a revision rollback.
+   pgvector container, then run natively against Cloud SQL: `eval.run_eval` gave the same
+   numbers as local (recall@5 28/29, MRR 0.79, refusal 1/5).
+4. ~~Cloud Run~~ **done** — service `rag-for-doa`, private (no `allUsers` invoker; calls need
+   an identity token from `gcloud auth print-identity-token` *plus* `X-API-Key`),
+   `max-instances=1`, 2 GiB / 1 CPU, runtime account `rag-ingest` (Cloud SQL client, Secret
+   Manager accessor per secret, bucket object user, Token Creator on itself). `DATABASE_URL`,
+   `OPENROUTER_API_KEY`, `API_KEYS`, `ADMIN_API_KEYS` come from Secret Manager. The DSN uses
+   `?host=/cloudsql/<instance>`, which works for both psycopg and asyncpg, so the two
+   connection strings did not have to differ. The password is percent-encoded in the DSN.
+   **`--no-cpu-throttling` is required, not tuning:** ingestion runs in a `BackgroundTasks`
+   handoff after the `202`, and a throttled instance gets no CPU once the response is sent.
+5. ~~Verify the live URL~~ **done** for private access: 401 wrong key, 200 `/health`, 429 on
+   the 11th request in a window (`Retry-After` set), 42 MB PDF through the signed-URL route
+   (`/admin/documents` answered 409 duplicate after size check, download and hash),
+   rollback to revision 00001 and forward again with no failed request. Connections: Cloud
+   SQL `max_connections` is 25 with 3 reserved; psycopg pool max 4 plus SQLAlchemy default
+   (5 + 10 overflow) is at most 19, which fits for one instance and does not leave room to
+   raise `max-instances`.
+   **Not done:** opening the service to the public, the OpenRouter spending limit, and the
+   GCP budget alert (the Budget API is not enabled yet). Do those before any public URL.
+
+Lesson from phase 4: signing a URL through IAM `signBlob` needs a token with the
+`cloud-platform` scope. The storage-scoped token `storage.Client()` holds fails on Cloud Run
+with `ACCESS_TOKEN_SCOPE_INSUFFICIENT`, while a developer's own ADC is broad enough to hide
+it, so the bug only showed on a real revision. `GcsObjectStore` now builds separate signing
+credentials; a test asserts the scope because no test can reach IAM.
+
+Git Bash on Windows, for anyone driving the live service by hand: `curl` mangles Thai in
+`-d`, so send UTF-8 JSON with `--data-binary @file`; an empty POST needs `-d ''` or Cloud Run
+answers 411; and a Thai file name can make `curl --data-binary @file` fail, so copy it to an
+ASCII name first.
 
 **All four models stay on OpenRouter.** The earlier plan moved them to Vertex AI as its own
 phase; that was dropped on cost — Vertex bills its own per-call rate on top of a GCP bill
@@ -373,10 +403,6 @@ riskiest phase of the deploy: every measured number (the 0.42 rerank threshold,
 `ANSWER_MODEL`'s gold-set table, the judge's attack results, the pinned per-document
 embedding model) carries over untouched, so no re-measurement and no re-embedding. The cost
 is egress off GCP, added latency, and an API key instead of IAM. See KNOWLEDGE.md.
-
-Known risk to test, not assume: Cloud Run reaches Cloud SQL over a unix socket, and
-`PGVectorStore` uses asyncpg while ingestion uses psycopg — the connection strings may have
-to differ. Also check Cloud SQL's connection limit against both pools.
 
 ## Conventions
 
