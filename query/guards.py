@@ -301,6 +301,9 @@ def deepseek_judge(prompt: str) -> str:
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.environ["OPENROUTER_API_KEY"],
+        # Judge calls take 3-6 s. A hang past this is "judge down", which
+        # already fails closed as GroundingUndecided (openai.OpenAIError below).
+        timeout=45,
     )
     reply = client.chat.completions.create(
         model=JUDGE_MODEL,

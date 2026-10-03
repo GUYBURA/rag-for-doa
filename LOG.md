@@ -313,3 +313,27 @@ all. This would have deployed as a container that crash-loops on Cloud Run
 with a Python traceback in the logs and no request ever served -- diagnosable,
 but through a log console, on a paid instance, after a deploy. It cost one
 `docker run` to find here.
+
+### Bug: /ask took 28-300 s on some questions, front end showed "can't connect"
+**Status:** Fixed
+**Date:** 2026-10-03
+**Cause:** `glm-5.3-flash` is a reasoning model. On the thrips-in-mango question
+one call used 3663 of 4187 completion tokens on hidden reasoning and took 69 s
+(28-40 s on two other runs). Retrieve, rerank and judge together were under 10 s,
+so the answer call was the whole cost. The web route aborted at 60 s, and the
+backend clients had no timeout at all, so one slow upstream could run to Cloud
+Run's 300 s limit (one 504 at 299.98 s).
+**Solution:** `reasoning: {effort: "low"}` on the answer call (same prompt: 33
+reasoning tokens, 12 s, same answer), a 60 s timeout on the answer client, 45 s
+on the judge (a hang there is already `GroundingUndecided`, fail closed), and the
+web route's timeout raised to 90 s with its own message. Gold set re-run with
+the cap: 28/29 answered, 28/28 cited the expected passage, 5/5 unanswerable
+refused, judge rejected 1 reply (q11, retried and grounded), 0 unreadable.
+**Tried and rejected:** `effort: "minimal"` (7.9 s) -- it does not skip
+reasoning, it moved 357 of 358 tokens into it, and the gain over `low` was not
+worth leaving the setting that actually produced short reasoning. The eval's
+"in Thai" count dropped to 25/28; checked q04, q21, q27 with and without the
+cap and the flag is the character-count heuristic flipping on answers full of
+Latin scientific names, not a language change. A full baseline run without the
+cap was abandoned when the eval's own `_read_verdict` crashed on a judge reply
+with `None` content (a harness gap, not a production path).

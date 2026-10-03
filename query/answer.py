@@ -54,6 +54,20 @@ from query.retrieve import CANDIDATES, retrieve
 # than belt and braces.
 ANSWER_MODEL = "z-ai/glm-5.3-flash"
 
+# glm-5.3-flash is a reasoning model and, left alone, spends most of its output
+# on hidden thinking: one thrips question used 3663 of 4187 completion tokens
+# on reasoning and took 28-69 s per call, so with the retry and the judge a
+# request could pass the front end's 60 s limit. effort=low on the same
+# prompt: 33 reasoning tokens, 12 s, same answer. The gold-set table above was
+# measured WITHOUT this, so the change is only kept if run_answer_eval
+# reproduces it -- see LOG.md.
+ANSWER_REASONING = {"effort": "low"}
+
+# Per call, not per request. Bounds one hung upstream so answer() cannot sit
+# for the full Cloud Run 300 s. A timeout raises out of answer() as a 500, never
+# as an ungrounded answer that could be served.
+CHAT_TIMEOUT_SECONDS = 60
+
 # One attempt, then exactly one retry (invariant 11: "failed grounding check ->
 # retry once, then refuse"). Not a tenacity policy: this is not a transient
 # network fault to back off from, it is a model that returned something
@@ -74,9 +88,11 @@ def openrouter_chat(prompt: str) -> str:
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.environ["OPENROUTER_API_KEY"],
+        timeout=CHAT_TIMEOUT_SECONDS,
     )
     reply = client.chat.completions.create(
         model=ANSWER_MODEL,
+        extra_body={"reasoning": ANSWER_REASONING},
         messages=[{"role": "user", "content": prompt}],
         # Measured, not precautionary: without this the model returns its JSON
         # inside a ```json fence and every reply fails to parse.
