@@ -531,3 +531,26 @@ def test_a_raising_ingest_archives_nothing(client, ingester, store):
     file_hash = _post(client).json()["file_hash"]
 
     assert not store._path(document_name(file_hash)).exists()
+
+
+# ---------------------------------------------------------------------------
+# Which store the app builds
+# ---------------------------------------------------------------------------
+
+
+def test_without_a_bucket_the_filesystem_store_is_used(monkeypatch):
+    monkeypatch.setattr(app_main, "GCS_BUCKET", "")
+
+    assert isinstance(app_main.build_object_store(), LocalObjectStore)
+
+
+def test_a_bucket_without_a_signer_email_fails_at_startup(monkeypatch):
+    """Not at the first upload. Without the email, signing would silently
+    look for a private key in the process -- the thing the IAM signing path
+    exists to avoid.
+    """
+    monkeypatch.setattr(app_main, "GCS_BUCKET", "agricultural_manual")
+    monkeypatch.setattr(app_main, "GCS_SIGNER_EMAIL", "")
+
+    with pytest.raises(RuntimeError, match="GCS_SIGNER_EMAIL"):
+        app_main.build_object_store()

@@ -36,6 +36,7 @@ from pydantic import BaseModel, StringConstraints
 
 from app.storage import (
     SIGNED_URL_TTL_SECONDS,
+    GcsObjectStore,
     LocalObjectStore,
     ObjectStore,
     document_name,
@@ -69,8 +70,17 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 # downloaded, so a refusal costs one metadata call rather than the transfer.
 MAX_OBJECT_BYTES = 512 * 1024 * 1024
 
-# Where LocalObjectStore keeps its objects. Replaced by a bucket when
-# GcsObjectStore lands; the endpoint does not change.
+# Which object store backs the upload routes. A bucket name switches to GCS;
+# without one the filesystem stand-in is used, which is what keeps the test
+# suite and a local run free of credentials.
+GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
+
+# The service account signed URLs are signed as. Required with GCS_BUCKET
+# because signing happens through the IAM Credentials API, which has to be
+# told whose signature to produce -- see app/storage.py.
+GCS_SIGNER_EMAIL = os.environ.get("GCS_SIGNER_EMAIL", "")
+
+# Where LocalObjectStore keeps its objects when no bucket is configured.
 OBJECT_STORE_ROOT = os.environ.get("OBJECT_STORE_ROOT", "data/objects")
 
 # The schema's own CHECK on document.scopes. Repeated here so a bad value is
@@ -172,6 +182,21 @@ class IngestSlot:
             return self._file_hash == file_hash
 
 
+def build_object_store() -> ObjectStore:
+    """GCS when a bucket is configured, the filesystem otherwise.
+
+    The signer email is demanded alongside the bucket rather than defaulted:
+    without it every signed URL would fall back to looking for a private key
+    in the process, which is the thing this design exists to avoid, and the
+    failure would appear at the first upload rather than at startup.
+    """
+    if not GCS_BUCKET:
+        return LocalObjectStore(Path(OBJECT_STORE_ROOT))
+    if not GCS_SIGNER_EMAIL:
+        raise RuntimeError("GCS_BUCKET is set but GCS_SIGNER_EMAIL is not")
+    return GcsObjectStore(GCS_BUCKET, signer_email=GCS_SIGNER_EMAIL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Iterator[None]:
     """Build the store and the pool once.
@@ -198,10 +223,9 @@ async def lifespan(app: FastAPI) -> Iterator[None]:
     # holds a connection for minutes, and Cloud SQL's smallest tier has few to
     # give. IngestSlot caps the long-lived holders at one, so the rest of this
     # pool stays available to /ask.
-    # Local today; a GcsObjectStore swaps in here and nothing above the seam
-    # changes. Created in lifespan rather than at import so a test's store can
-    # be injected without the module having made a directory first.
-    app.state.object_store = LocalObjectStore(Path(OBJECT_STORE_ROOT))
+    # Created in lifespan rather than at import so a test's store can be
+    # injected without the module having built a client or made a directory.
+    app.state.object_store = build_object_store()
     with ConnectionPool(dsn, min_size=2, max_size=4) as pool:
         app.state.pool = pool
         yield
