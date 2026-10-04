@@ -45,6 +45,15 @@ from query.prompt import Answer
 # changes what it lets through is worse than no guard.
 JUDGE_MODEL = "deepseek/deepseek-v4-flash-0731"
 
+# Thinking off. With it on, one verdict cost 5 s to 344 s (up to 8951 hidden
+# reasoning tokens) and made /ask take over a minute. `effort` and
+# `max_tokens` budgets were measured and are not enforced for this model;
+# `enabled: false` is, and gives 1-5 s with zero reasoning tokens. A binary
+# verdict against quoted excerpts does not need a chain of thought, but that
+# is a claim about quality, so it was measured: see LOG.md for the
+# attacks.yaml and gold-set numbers against the thinking-on judge.
+JUDGE_REASONING = {"enabled": False}
+
 # Refusals are not interchangeable. REFUSAL_TEXT says the corpus had nothing;
 # saying that to someone whose question was blocked for containing an ID card
 # number would be a lie, and would hide the one thing they can act on.
@@ -309,6 +318,7 @@ def deepseek_judge(prompt: str) -> str:
         model=JUDGE_MODEL,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
+        extra_body={"reasoning": JUDGE_REASONING},
     )
     return reply.choices[0].message.content
 
