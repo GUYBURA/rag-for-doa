@@ -313,3 +313,63 @@ all. This would have deployed as a container that crash-loops on Cloud Run
 with a Python traceback in the logs and no request ever served -- diagnosable,
 but through a log console, on a paid instance, after a deploy. It cost one
 `docker run` to find here.
+
+### Bug: /ask took 28-300 s on some questions, front end showed "can't connect"
+**Status:** Fixed
+**Date:** 2026-10-03
+**Cause:** `glm-5.3-flash` is a reasoning model. On the thrips-in-mango question
+one call used 3663 of 4187 completion tokens on hidden reasoning and took 69 s
+(28-40 s on two other runs). Retrieve, rerank and judge together were under 10 s,
+so the answer call was the whole cost. The web route aborted at 60 s, and the
+backend clients had no timeout at all, so one slow upstream could run to Cloud
+Run's 300 s limit (one 504 at 299.98 s).
+**Solution:** `reasoning: {effort: "low"}` on the answer call (same prompt: 33
+reasoning tokens, 12 s, same answer), a 60 s timeout on the answer client, 45 s
+on the judge (a hang there is already `GroundingUndecided`, fail closed), and the
+web route's timeout raised to 90 s with its own message. Gold set re-run with
+the cap: 28/29 answered, 28/28 cited the expected passage, 5/5 unanswerable
+refused, judge rejected 1 reply (q11, retried and grounded), 0 unreadable.
+**Tried and rejected:** `effort: "minimal"` (7.9 s) -- it does not skip
+reasoning, it moved 357 of 358 tokens into it, and the gain over `low` was not
+worth leaving the setting that actually produced short reasoning. The eval's
+"in Thai" count dropped to 25/28; checked q04, q21, q27 with and without the
+cap and the flag is the character-count heuristic flipping on answers full of
+Latin scientific names, not a language change. A full baseline run without the
+cap was abandoned when the eval's own `_read_verdict` crashed on a judge reply
+with `None` content (a harness gap, not a production path).
+
+### Bug: grounding judge is the remaining /ask latency (deepseek-v4-flash-0731)
+**Status:** Open
+**Date:** 2026-10-03
+**Cause:** After capping the answer model, live `/ask` for the thrips question
+still took 68-78 s. The answer call is now ~10 s; the judge call, same prompt
+shape, took 5 s to 344 s (8951 reasoning tokens in the worst one). The OpenAI
+client's `timeout=45` did not bound it: httpx timeouts are per read, not total,
+and the SDK retries internally, so a "45 s" call ran 80 s.
+**Tried and rejected:** `reasoning: {effort: "low"}` -- reasoning tokens 195,
+3678, 710 across three calls, so it is not enforced for this model.
+`reasoning: {max_tokens: 800}` -- 1790, 1206, 1501, 2119 reasoning tokens, 37-59 s,
+not honoured either. A top-level `max_tokens` would truncate the JSON and turn
+into GroundingUndecided, i.e. a refusal. Not shipped: changing the judge's
+model or settings means re-running eval/attacks.yaml and the gold set.
+
+### Bug: grounding judge latency (follow-up, closes the entry above)
+**Status:** Fixed
+**Date:** 2026-10-04
+**Solution:** `reasoning: {enabled: false}` on the judge call. Unlike `effort` and
+`max_tokens`, it is enforced for deepseek-v4-flash-0731: 0 reasoning tokens,
+1-5 s per verdict (was 5-344 s). Measured against the thinking-on judge:
+attacks.yaml 9/9 blocked and benign 4/4 (same as thinking on); gold set 28/29
+answered, 31 judge calls, 0 unreadable.
+**q32 is not a regression:** with thinking off the wrong-crop question
+(mango leafhopper asked about durian) was answered in 2 of 6 runs; with thinking
+ON, 4 of 6. The answer says the pest is not listed for durian and names
+durian's own leafhopper with its chemicals, all from cited excerpts, so the judge
+passes it either way. The earlier 5/5 unanswerable refusals were sampling luck of
+the answer model. The gold label may be too strict for this phrasing; not edited.
+**Tried and rejected:** swapping the judge. gpt-4.1-mini: 6/9 attacks blocked
+(a04, a05, a06 passed), benign 3/4, q32 answered, 4/5 unanswerable refused.
+claude-haiku-4.5: ignores `response_format` and fences its JSON, so 29/29 replies
+were unreadable; with the fence stripped in a test wrapper it refused 7
+answerable gold questions (22/29), still passed a04, benign 3/4. Both are weaker
+guards than the current judge. Neither has a dated slug on OpenRouter either.
