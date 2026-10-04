@@ -346,7 +346,7 @@ breaks line continuations inside the container.
 
 Not written yet, so the command does not exist: `db/seed.sql`.
 
-## Deployment (phases 1-5 done privately; public access pending)
+## Deployment (phases 1-5 done; live and public)
 
 Target is Google Cloud; `ARCHITECTURE.md` § Deployment has the table. The order is fixed on
 purpose — change one variable at a time, and end each phase by matching a number already
@@ -365,9 +365,9 @@ measured locally:
 3. ~~Dockerfile + `.dockerignore`~~ **done** — built and smoke-tested against a local
    pgvector container, then run natively against Cloud SQL: `eval.run_eval` gave the same
    numbers as local (recall@5 28/29, MRR 0.79, refusal 1/5).
-4. ~~Cloud Run~~ **done** — service `rag-for-doa`, private (no `allUsers` invoker; calls need
-   an identity token from `gcloud auth print-identity-token` *plus* `X-API-Key`),
-   `max-instances=1`, 2 GiB / 1 CPU, runtime account `rag-ingest` (Cloud SQL client, Secret
+4. ~~Cloud Run~~ **done** — service `rag-for-doa`, public since 2026-10-03 through the console's
+   "Allow public access" (`run.googleapis.com/invoker-iam-disabled=true`, not an `allUsers`
+   binding); every call still needs `X-API-Key`. `max-instances=1`, 2 GiB / 1 CPU, runtime account `rag-ingest` (Cloud SQL client, Secret
    Manager accessor per secret, bucket object user, Token Creator on itself). `DATABASE_URL`,
    `OPENROUTER_API_KEY`, `API_KEYS`, `ADMIN_API_KEYS` come from Secret Manager. The DSN uses
    `?host=/cloudsql/<instance>`, which works for both psycopg and asyncpg, so the two
@@ -381,8 +381,28 @@ measured locally:
    SQL `max_connections` is 25 with 3 reserved; psycopg pool max 4 plus SQLAlchemy default
    (5 + 10 overflow) is at most 19, which fits for one instance and does not leave room to
    raise `max-instances`.
-   **Not done:** opening the service to the public, the OpenRouter spending limit, and the
-   GCP budget alert (the Budget API is not enabled yet). Do those before any public URL.
+   The OpenRouter spending limit and the GCP budget alert are set. Front end: separate repo
+   `rag-for-doa-web` (Next.js on Vercel); the API key lives in its server route only.
+
+**`max-instances` exists at two levels.** After the rollback test the revision still had
+`maxScale=3` while the service said 1, and the rate limit counts in memory. Check the
+revision (`gcloud run revisions describe`), not just the service. Traffic can also stay
+pinned to an old revision after a rollback: `update-traffic --to-latest` before assuming a
+deploy is serving.
+
+Deploy by hand: `docker build` and `docker push` to
+`asia-southeast1-docker.pkg.dev/rag-for-doa/rag/app:<git sha>`, then
+`gcloud run deploy rag-for-doa --region=asia-southeast1 --image=<that tag>`.
+
+**Reasoning tokens are the latency and the bill.** Both OpenRouter chat calls are reasoning
+models. Left alone, `ANSWER_MODEL` spent about 3,700 of 4,200 output tokens thinking
+(28-69 s a call) and the judge up to 8,951 (5-344 s), so `/ask` took over a minute. Now
+`ANSWER_REASONING = {"effort": "low"}` and `JUDGE_REASONING = {"enabled": False}`. For the
+judge only `enabled: false` is enforced; `effort` and `max_tokens` are not (LOG.md).
+Measured with the gold set (28/29 answered, 28/28 cited) and `attacks.yaml` (9/9 blocked,
+benign 4/4). Both clients also carry timeouts, but httpx's timeout is per read, not total,
+and the SDK retries, so it is a backstop and not a deadline. Changing either setting or
+either model means re-running both eval sets. Live `/ask` is now 1-19 s.
 
 Lesson from phase 4: signing a URL through IAM `signBlob` needs a token with the
 `cloud-platform` scope. The storage-scoped token `storage.Client()` holds fails on Cloud Run
