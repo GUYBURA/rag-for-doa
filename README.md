@@ -189,17 +189,32 @@ defences.
 
 ## Status
 
-End to end and answering questions, locally, behind authentication, a rate limit and the
-guard layer. Every stage landed with the tests that prove it before the next one started —
-225 of them, 199 run in CI on every push including the ones that need a real Postgres with
-pgvector. The 26 CI skips are the ones that need the source PDFs (gitignored) or a live
-API key.
+Live on Google Cloud, behind authentication, a rate limit and the guard layer. Try it at
+**https://rag-for-doa-web.vercel.app** (a Next.js front end in
+[rag-for-doa-web](https://github.com/GUYBURA/rag-for-doa-web); the API key stays in its
+server route). Every stage landed with the tests that prove it before the next one started —
+274 run in CI on every push, including the ones that need a real Postgres with pgvector.
+The skipped ones need the source PDFs (gitignored) or a live API key.
+
+Cloud Run (single instance, asia-southeast1) in front of Cloud SQL for PostgreSQL with
+pgvector; secrets in Secret Manager; originals archived in a bucket. A typical question
+answers in 1-19 s.
 
 All three editions are ingested, 2568 is active, and the other two are archived with their
 passages removed from search and their records kept.
 
-Not deployed yet. Deployment to Google Cloud is the next stage and is planned, not started —
-see Next.
+Deployed in five phases, each ending on a number already measured locally: the Cloud SQL
+corpus matches local row by row by content hash, and `eval.run_eval` gives the same
+recall@5 (28/29) and MRR (0.79) against it. The rollback drill and the 401/200/429
+checks were run against the live URL.
+
+**Latency was a real bug, found only in production.** The first public question took over a
+minute and the front end gave up. Both chat models were reasoning models spending most of
+their output on hidden thinking (up to 8,951 tokens per judge verdict). Capping the answer
+model's reasoning and turning the judge's off took `/ask` from 70+ s to 1-19 s and cut the
+output-token bill, with the gold set (28/29 answered, 28/28 cited) and the injection set
+(9/9 blocked, benign 4/4) re-run before it shipped. Two cheaper replacement judges were
+measured and rejected because they were weaker guards. Details in [LOG.md](LOG.md).
 
 **Working**
 
@@ -292,31 +307,23 @@ see Next.
 - **Authentication and rate limiting** — an API key per caller, compared in constant time,
   with the same response for a missing key and a wrong one. Each key gets 10 requests a
   minute, counted in memory. That is correct only with one running instance, which is how
-  it will be deployed, and it deliberately has no daily cap: a serverless instance that
+  it is deployed (`max-instances=1`), and it deliberately has no daily cap: a serverless instance that
   scales to zero loses its memory, so the real spending ceiling is a limit set at the model
   provider.
 
 **Next**
 
-- **Deployment to Google Cloud**, in phases that each end by matching a number already
-  measured locally:
-  1. Set up the project, a budget alert, and the region, chosen by database latency.
-  2. Cloud SQL for PostgreSQL with pgvector, ingested from a workstation through the Cloud
-     SQL Auth Proxy, and checked row by row against the local database by content hash.
-  3. A container image for the query service — **built**, and smoke-tested against a local
-     database; still to be run against the cloud one.
-  4. Cloud Run with a single instance, a dedicated least-privilege service account, and
-     secrets in Secret Manager.
-  5. Verification against the live URL, including a rollback drill.
+- Section detection, below, and then edition-correctness questions in the gold set.
+- A non-superuser database role for the app, and a `db/seed.sql` for local development.
+- Later: ingestion as a Cloud Run Job reading PDFs from Cloud Storage, and CI/CD for
+  deploys (today they are `docker build`, `docker push`, `gcloud run deploy`).
 
-  The four models (embedding, reranker, answer, judge) stay on OpenRouter. Moving them to
-  Vertex AI was the original first phase and was dropped on cost: Vertex adds a per-call
-  bill on top of one already paying for Cloud SQL and Cloud Run, where OpenRouter is
-  pay-per-token behind a hard spending limit. It also means no score is re-measured and the
-  corpus is not re-embedded, at the price of egress, a little latency, and an API key in
-  place of IAM.
-- Later: ingestion as a Cloud Run Job reading PDFs from Cloud Storage, a web frontend that
-  holds the API key server-side, and CI/CD.
+The four models (embedding, reranker, answer, judge) stay on OpenRouter. Moving them to
+Vertex AI was the original deployment plan and was dropped on cost: Vertex adds a per-call
+bill on top of one already paying for Cloud SQL and Cloud Run, where OpenRouter is
+pay-per-token behind a hard spending limit. It also means no score is re-measured and the
+corpus is not re-embedded, at the price of egress, a little latency, and an API key in
+place of IAM.
 
 **Known gaps**
 
